@@ -24,15 +24,10 @@ return Application::configure(basePath: dirname(__DIR__))
             'audit' => AuditRequestMiddleware::class,
         ]);
 
-        // Auditoría automática y redirección HTTPS en rutas web
+        // Auditoría y configuración HTTPS para las rutas web
         $middleware->appendToGroup('web', [
             AuditRequestMiddleware::class,
             ForceHttps::class,
-        ]);
-
-        // Aplicar validación de usuario activo a las rutas autenticadas
-        $middleware->appendToGroup('auth', [
-            EnsureUserIsActive::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
