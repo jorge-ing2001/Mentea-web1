@@ -24,7 +24,7 @@ class AppServiceProvider extends ServiceProvider
             URL::forceScheme('https');
         }
 
-        // Permisos del superadministrador
+        // Permitir todas las acciones al superadministrador
         Gate::before(function ($user, $ability) {
             return method_exists($user, 'hasRole')
                 && $user->hasRole('super_admin')
@@ -32,7 +32,7 @@ class AppServiceProvider extends ServiceProvider
                     : null;
         });
 
-        // Políticas de autorización
+        // Registrar políticas de autorización
         Gate::policy(Appointment::class, AppointmentPolicy::class);
         Gate::policy(Professional::class, ProfessionalPolicy::class);
     }
