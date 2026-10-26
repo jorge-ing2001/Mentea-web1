@@ -16,6 +16,7 @@ use App\Services\Chat\ChatTools;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
+use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
 
 class ChatAgentServiceTest extends TestCase
@@ -147,6 +148,86 @@ class ChatAgentServiceTest extends TestCase
         $conversation->refresh();
         $this->assertNotNull($conversation->crisis_flagged_at);
         $this->assertNotNull($conversation->escalated_at);
+    }
+
+    /**
+     * La capa de refuerzo (regex) debe capturar PARÁFRASIS de crisis que la
+     * lista de palabras exactas no cubre, deteniendo el agendamiento.
+     */
+    #[DataProvider('paraphrasedCrisisMessages')]
+    public function test_paraphrased_crisis_language_is_detected_and_books_nothing(string $message): void
+    {
+        $this->seedProfessional();
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        $result = $this->agent()->handle($conversation, $message, $patient);
+
+        $this->assertTrue($result['crisis'], "No detectó crisis en: {$message}");
+        $this->assertTrue($result['escalated']);
+        $this->assertStringContainsString('123', $result['reply']);
+        $this->assertEmpty($result['slots']);
+        $this->assertDatabaseCount('appointments', 0);
+    }
+
+    /**
+     * @return array<string,array{0:string}>
+     */
+    public static function paraphrasedCrisisMessages(): array
+    {
+        return [
+            'ya no le veo sentido a nada' => ['Ya no le encuentro sentido a nada, agéndame una cita'],
+            'ya no aguanto' => ['Ya no aguanto más esta situación'],
+            'quisiera no despertar' => ['A veces quisiera no despertar mañana'],
+            'quiero desaparecer' => ['Solo quiero desaparecer de todo esto'],
+            'no veo salida' => ['No veo ninguna salida a lo que me pasa'],
+            'estarian mejor sin mi' => ['Todos estarían mejor sin mí'],
+            'acabar con todo esto' => ['Pienso en acabar con todo esto de una vez'],
+        ];
+    }
+
+    /**
+     * Una negación directa de la ideación NO debe disparar la capa de patrones
+     * (fallback seguro sin inundar de falsos positivos). La capa 1 de palabras
+     * clave explícitas no se ve afectada por esto.
+     */
+    public function test_negated_ideation_does_not_trigger_pattern_layer(): void
+    {
+        $this->seedProfessional();
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        // "pienso en desaparecer" coincide con un patrón de la capa 2, pero la
+        // negación directa "no pienso en" lo atenúa; no hay palabra clave de
+        // la capa 1 en el mensaje, así que no debe marcarse crisis.
+        $result = $this->agent()->handle(
+            $conversation,
+            'No pienso en desaparecer, solo quiero agendar una cita de psicología',
+            $patient
+        );
+
+        $this->assertFalse($result['crisis']);
+    }
+
+    /**
+     * La negación NO puede anular una palabra clave explícita de la capa 1:
+     * el piso determinista siempre dispara.
+     */
+    public function test_explicit_keyword_fires_even_with_negation_phrasing(): void
+    {
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        // Contiene la frase exacta "quitarme la vida" (capa 1) junto a una
+        // construcción negativa: la capa 1 debe disparar igualmente.
+        $result = $this->agent()->handle(
+            $conversation,
+            'No sé, a veces pienso en quitarme la vida',
+            $patient
+        );
+
+        $this->assertTrue($result['crisis']);
+        $this->assertStringContainsString('123', $result['reply']);
     }
 
     public function test_crisis_text_respects_system_setting_override(): void

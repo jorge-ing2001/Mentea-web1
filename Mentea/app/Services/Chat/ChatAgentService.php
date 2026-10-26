@@ -761,9 +761,64 @@ class ChatAgentService
 
     // ---- Detección (heurísticas en español) ------------------------------
 
+    /**
+     * Detección de crisis en dos capas, con sesgo deliberado a FALLAR-SEGURO
+     * (preferir un falso positivo a dejar pasar una crisis real):
+     *
+     *   1. Piso determinista: lista de palabras/frases exactas
+     *      (config('chat.crisis_keywords')). Un match aquí SIEMPRE dispara y
+     *      NO puede ser anulado por nada (ni por negaciones).
+     *   2. Capa de refuerzo: expresiones regulares sobre el texto normalizado
+     *      (config('chat.crisis_patterns')) que capturan paráfrasis. Esta capa
+     *      SOLO puede ELEVAR la señal; se descarta únicamente cuando el mensaje
+     *      contiene una negación directa de la ideación (config
+     *      'chat.crisis_pattern_negations'), para acotar falsos positivos.
+     */
     private function detectsCrisis(string $message): bool
     {
-        return $this->matchesAny($message, (array) config('chat.crisis_keywords', []));
+        // Capa 1: piso de palabras clave exactas. Incondicional.
+        if ($this->matchesAny($message, (array) config('chat.crisis_keywords', []))) {
+            return true;
+        }
+
+        // Capa 2: paráfrasis por regex. Solo eleva la señal; puede atenuarse
+        // ante una negación directa, nunca anula la capa 1 (ya evaluada arriba).
+        return $this->matchesCrisisPattern($message);
+    }
+
+    private function matchesCrisisPattern(string $message): bool
+    {
+        $normalized = $this->normalize($message);
+
+        if ($normalized === '') {
+            return false;
+        }
+
+        $matched = false;
+        foreach ((array) config('chat.crisis_patterns', []) as $pattern) {
+            if (! is_string($pattern) || $pattern === '') {
+                continue;
+            }
+
+            if (@preg_match($pattern, $normalized) === 1) {
+                $matched = true;
+                break;
+            }
+        }
+
+        if (! $matched) {
+            return false;
+        }
+
+        // Negación directa de la ideación: atenúa el patrón (no la capa 1).
+        foreach ((array) config('chat.crisis_pattern_negations', []) as $negation) {
+            $n = $this->normalize((string) $negation);
+            if ($n !== '' && str_contains($normalized, $n)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function requiresHumanEscalation(string $message): bool

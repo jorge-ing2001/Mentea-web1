@@ -85,11 +85,52 @@ return [
     | agendamiento y se entrega el texto de crisis.
     */
     'crisis_keywords' => [
-        'suicidio', 'suicidarme', 'quitarme la vida', 'quitarme la vída',
+        'suicidio', 'suicidarme', 'suicidarse', 'quitarme la vida', 'quitarme la vída',
         'hacerme daño', 'hacerme dano', 'lastimarme', 'matarme', 'me quiero morir',
         'quiero morir', 'no quiero vivir', 'no quiero seguir viviendo',
         'acabar con todo', 'acabar con mi vida', 'terminar con mi vida',
-        'autolesion', 'autolesión', 'me voy a matar', 'quitarme de en medio',
+        'autolesion', 'autolesión', 'cortarme', 'me voy a matar', 'quitarme de en medio',
+        'me quiero desaparecer', 'quiero desaparecer', 'dejar de existir',
+        'no aguanto mas', 'ya no aguanto', 'no puedo mas', 'ya no puedo mas',
+        'no vale la pena vivir', 'nada tiene sentido', 'no le encuentro sentido',
+        'estoy mejor muerto', 'estarian mejor sin mi', 'sin mi estarian mejor',
+    ],
+
+    /*
+    | Capa de REFUERZO de la detección de crisis: expresiones regulares sobre
+    | el texto normalizado (minúsculas + sin tildes). Captura PARÁFRASIS que la
+    | lista de palabras exacta no cubre ("ya no le veo sentido a nada",
+    | "pienso en acabar con todo esto", "quisiera no despertar"). Esta capa SOLO
+    | puede ELEVAR la señal de crisis: nunca anula un match de 'crisis_keywords'.
+    | Se evalúa con detección de negación para reducir falsos positivos
+    | ("no quiero hacerme daño" NO debe disparar).
+    */
+    'crisis_patterns' => [
+        // Ideación suicida parafraseada.
+        '/\b(quiero|quisiera|deseo|pienso en|ganas de|voy a)\b.{0,25}\b(morir(me)?|desaparecer|no (despertar|existir|estar)|dejar de (existir|vivir|ser))\b/u',
+        '/\b(no|ya no)\b.{0,15}\b(quiero|deseo|vale la pena)\b.{0,15}\b(vivir|seguir|existir|estar aqui)\b/u',
+        // Desesperanza / sin salida.
+        '/\b(ya )?no (aguanto|soporto|resisto|puedo)( mas| con esto| con todo| seguir)?\b/u',
+        '/\b(no (hay|veo|encuentro)|sin)\b.{0,20}\b(salida|solucion|sentido|esperanza|futuro)\b/u',
+        '/\bnada (tiene|me da) sentido\b/u',
+        // Autolesión / planes de daño.
+        '/\b(hacerme|causarme|provocarme)\b.{0,15}\b(dano|daño|mal)\b/u',
+        '/\b(acabar|terminar)\b.{0,15}\b(con (todo|mi vida|esto|mi existencia))\b/u',
+        '/\b(cortar(me)?|lastimar(me)?|golpear(me)?)\b.{0,15}\b(para sentir|otra vez|de nuevo|cuando)\b/u',
+        // El mundo / los demás estarían mejor sin la persona.
+        '/\b(estarian|estarias|estaria todo|todo estaria)\b.{0,15}\bmejor (sin mi|si no (estuviera|existiera))\b/u',
+    ],
+
+    /*
+    | Marcadores de NEGACIÓN que invalidan una coincidencia de patrón (no de
+    | palabra clave explícita). Si el texto contiene una negación directa de la
+    | ideación ("no quiero morir", "jamas pensaria en hacerme daño") el patrón
+    | NO dispara. La lista 'crisis_keywords' no se ve afectada por esto.
+    */
+    'crisis_pattern_negations' => [
+        'no quiero morir', 'no quiero hacerme dano', 'no quiero hacerme daño',
+        'no pienso en', 'jamas pensaria', 'nunca pensaria', 'no me quiero morir',
+        'no tengo pensamientos', 'no tengo ideas de',
     ],
 
     /*
