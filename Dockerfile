@@ -29,3 +29,9 @@ RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cac
 
 # Exponer el puerto 80
 EXPOSE 80
+
+# Cambiar el document root de Apache a la carpeta public
+RUN sed -i 's|/var/www/html|/var/www/html/public|g' /etc/apache2/sites-available/000-default.conf
+
+# Habilitar mod_rewrite para que las rutas de Laravel funcionen
+RUN a2enmod rewrite
