@@ -1,3 +1,4 @@
+```php
 <?php
 
 use App\Http\Middleware\AuditRequestMiddleware;
@@ -16,30 +17,29 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        // Alias de middleware personalizados
         $middleware->alias([
             'role' => EnsureUserHasRole::class,
             'active' => EnsureUserIsActive::class,
             'audit' => AuditRequestMiddleware::class,
         ]);
 
-        // Auditoría automática de escrituras en rutas web
+        // Auditoría automática y redirección HTTPS en rutas web
         $middleware->appendToGroup('web', [
             AuditRequestMiddleware::class,
             ForceHttps::class,
         ]);
 
-        // Cookies / URLs seguras en producción
-        if (env('APP_ENV') === 'production') {
-            \Illuminate\Support\Facades\URL::forceScheme('https');
-        }
-
-        // Aplicar "active" a todas las rutas autenticadas
+        // Aplicar validación de usuario activo a las rutas autenticadas
         $middleware->appendToGroup('auth', [
             EnsureUserIsActive::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
         $exceptions->shouldRenderJsonWhen(
-            fn (Request $request) => $request->is('api/*') || $request->expectsJson(),
+            fn (Request $request) =>
+                $request->is('api/*') || $request->expectsJson(),
         );
-    })->create();
+    })
+    ->create();
+```
