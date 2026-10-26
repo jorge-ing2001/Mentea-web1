@@ -76,7 +76,6 @@ class WaitlistTest extends TestCase
     {
         $this->get(route('patient.waitlist.index'))->assertRedirect(route('login'));
     }
-}
 
     public function test_waitlist_scan_job_runs_without_error(): void
     {
@@ -97,3 +96,4 @@ class WaitlistTest extends TestCase
 
         $this->assertTrue(true); // no exception
     }
+}
