@@ -2,11 +2,18 @@
 
 namespace App\Services\Chat;
 
+use App\Enums\AppointmentStatus;
+use App\Enums\Modality;
+use App\Models\Appointment;
 use App\Models\ChatConversation;
 use App\Models\ChatMessage;
 use App\Models\Professional;
 use App\Models\SystemSetting;
 use App\Models\User;
+use App\Services\AvailabilityService;
+use Carbon\Carbon;
+use Illuminate\Support\Collection;
+use Illuminate\Validation\ValidationException;
 
 /**
  * Orquestador del agente conversacional nativo de Mentea.
@@ -36,25 +43,22 @@ class ChatAgentService
     /**
      * Procesa un turno del usuario y devuelve la respuesta del asistente + meta.
      *
-     * @return array{reply:string, conversation_id:int, crisis:bool, escalated:bool, requires_consent:bool, slots:array<int,array<string,mixed>>}
+     * @return array{reply:string, conversation_id:int, crisis:bool, escalated:bool, requires_consent:bool, requires_login:bool, slots:array<int,array<string,mixed>>}
      */
     public function handle(ChatConversation $conversation, string $userMessage, ?User $user = null): array
     {
         $userMessage = trim($userMessage);
 
+        // Capturar la acción pendiente (oferta de cupos / reprogramación) ANTES
+        // de persistir el mensaje nuevo, para que un turno de seguimiento
+        // ("la primera", "las 9:00", "sí") se resuelva a un cupo concreto.
+        $pending = $conversation->pendingAction();
+
         // 1) Persistir el mensaje entrante.
         $this->persist($conversation, 'user', $userMessage);
 
-        $crisis = false;
-        $escalated = false;
-        $requiresConsent = false;
-        $slots = [];
-        $meta = [];
-
         // 2) REGLA DURA: crisis primero. Corta todo el flujo de agendamiento.
         if ($this->detectsCrisis($userMessage)) {
-            $crisis = true;
-            $escalated = true;
             $reply = $this->crisisText();
 
             $conversation->forceFill([
@@ -62,60 +66,399 @@ class ChatAgentService
                 'escalated_at' => now(),
             ])->save();
 
-            return $this->finish($conversation, $reply, compact('crisis', 'escalated', 'requiresConsent', 'slots') + ['meta' => ['reason' => 'crisis']]);
+            return $this->finish($conversation, $reply, [
+                'crisis' => true,
+                'escalated' => true,
+                'meta' => ['reason' => 'crisis'],
+            ]);
         }
 
         // 3) REGLA DURA: escalado a humano (clínico / menores / fuera de alcance).
         if ($this->requiresHumanEscalation($userMessage)) {
-            $escalated = true;
             $reply = $this->escalationText();
 
             $conversation->forceFill(['escalated_at' => now()])->save();
 
-            return $this->finish($conversation, $reply, compact('crisis', 'escalated', 'requiresConsent', 'slots') + ['meta' => ['reason' => 'escalation']]);
+            return $this->finish($conversation, $reply, [
+                'escalated' => true,
+                'meta' => ['reason' => 'escalation'],
+            ]);
         }
 
-        $wantsToBook = $this->intendsToBook($userMessage);
-
-        // 4) REGLA DURA: consentimiento antes de recolectar datos / agendar.
-        if ($wantsToBook) {
-            if (! $user instanceof User || ! $user->isPatient()) {
-                $requiresConsent = true;
-                $reply = $this->guestBookingText();
-
-                return $this->finish($conversation, $reply, compact('crisis', 'escalated', 'requiresConsent', 'slots') + ['meta' => ['reason' => 'guest_booking']]);
+        // 4) Seguimiento de una acción pendiente (confirmar un cupo ofrecido o
+        //    una reprogramación). Requiere paciente autenticado con consentimiento.
+        if ($pending !== null && $this->isAuthenticatedPatientWithConsent($user)) {
+            $resolved = $this->resolvePendingAction($conversation, $pending, $userMessage, $user);
+            if ($resolved !== null) {
+                return $resolved;
             }
+        }
 
-            if (! $user->hasInformedConsent()) {
-                $requiresConsent = true;
-                $reply = $this->consentText();
+        // 5) Cancelar una cita existente a través del agente.
+        if ($this->intendsToCancel($userMessage)) {
+            return $this->handleCancel($conversation, $userMessage, $user);
+        }
 
-                return $this->finish($conversation, $reply, compact('crisis', 'escalated', 'requiresConsent', 'slots') + ['meta' => ['reason' => 'consent']]);
+        // 6) Reprogramar una cita existente a través del agente.
+        if ($this->intendsToReschedule($userMessage)) {
+            return $this->handleReschedule($conversation, $userMessage, $user);
+        }
+
+        // 7) Alta explícita en lista de espera.
+        if ($this->intendsWaitlist($userMessage)) {
+            return $this->handleWaitlist($conversation, $userMessage, $user);
+        }
+
+        // 8) REGLA DURA: consentimiento antes de recolectar datos / agendar.
+        if ($this->intendsToBook($userMessage)) {
+            $gate = $this->bookingGate($conversation, $user);
+            if ($gate !== null) {
+                return $gate;
             }
 
             // Consentimiento OK: ofrecer cupos REALES (2-4) si hay servicio detectable.
-            [$slots, $bookingReply] = $this->offerRealSlots($userMessage);
+            [$slots, $bookingReply, $offerMeta] = $this->offerRealSlots($userMessage);
 
             if ($bookingReply !== null) {
                 $reply = $this->phrase($conversation, $userMessage, $bookingReply, $user);
 
-                return $this->finish($conversation, $reply, compact('crisis', 'escalated', 'requiresConsent', 'slots') + ['meta' => ['reason' => 'slots_offered']]);
+                return $this->finish($conversation, $reply, [
+                    'slots' => $slots,
+                    'meta' => array_merge(['reason' => 'slots_offered'], $offerMeta),
+                ]);
             }
         }
 
-        // 5) Conversación general: listar servicios / saludo, redactado por el
+        // 9) Conversación general: listar servicios / saludo, redactado por el
         //    modelo si está configurado, con fallback determinista si no.
         $deterministic = $this->deterministicReply($userMessage);
         $reply = $this->phrase($conversation, $userMessage, $deterministic, $user);
 
-        return $this->finish($conversation, $reply, compact('crisis', 'escalated', 'requiresConsent', 'slots') + ['meta' => $meta]);
+        return $this->finish($conversation, $reply, ['meta' => []]);
+    }
+
+    /**
+     * Puerta de reglas de agendamiento: distingue "debe iniciar sesión" de
+     * "debe aceptar consentimiento". Devuelve una respuesta ya cerrada si la
+     * puerta bloquea, o null si el paciente puede continuar.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function bookingGate(ChatConversation $conversation, ?User $user): ?array
+    {
+        if (! $user instanceof User || ! $user->isPatient()) {
+            return $this->finish($conversation, $this->guestBookingText(), [
+                'requires_login' => true,
+                'requires_consent' => true,
+                'meta' => ['reason' => 'guest_booking'],
+            ]);
+        }
+
+        if (! $user->hasInformedConsent()) {
+            return $this->finish($conversation, $this->consentText(), [
+                'requires_consent' => true,
+                'meta' => ['reason' => 'consent'],
+            ]);
+        }
+
+        return null;
+    }
+
+    private function isAuthenticatedPatientWithConsent(?User $user): bool
+    {
+        return $user instanceof User && $user->isPatient() && $user->hasInformedConsent();
+    }
+
+    /**
+     * Resuelve un turno de seguimiento sobre una oferta pendiente. Re-verifica
+     * el cupo contra AvailabilityService JUSTO antes de reservar/reprogramar;
+     * si ya no está disponible, degrada con gracia y re-ofrece.
+     *
+     * @param  array<string,mixed>  $pending
+     * @return array<string,mixed>|null Respuesta cerrada o null si el mensaje
+     *                                  no era una selección reconocible.
+     */
+    private function resolvePendingAction(ChatConversation $conversation, array $pending, string $message, User $user): ?array
+    {
+        $type = (string) ($pending['type'] ?? '');
+        $slots = (array) ($pending['slots'] ?? []);
+
+        if ($slots === [] || ! in_array($type, ['book', 'reschedule'], true)) {
+            return null;
+        }
+
+        // Si el usuario pide cancelar la operación pendiente.
+        if ($this->matchesAny($message, ['cancelar', 'cancela', 'mejor no', 'olvidalo', 'olvídalo', 'dejalo', 'déjalo'])
+            && ! $this->matchesAny($message, ['cita', 'turno'])) {
+            return $this->finish($conversation, 'Sin problema, no agendé nada. ¿Te ayudo con algo más?', [
+                'meta' => ['reason' => 'offer_dismissed'],
+            ]);
+        }
+
+        $selected = $this->matchSelection($message, $slots);
+
+        if ($selected === null) {
+            return null;
+        }
+
+        $professional = Professional::find($selected['professional_id'] ?? null);
+
+        if (! $professional instanceof Professional) {
+            return $this->finish($conversation, $this->noAvailabilityText(), [
+                'meta' => ['reason' => 'offer_stale'],
+            ]);
+        }
+
+        $date = (string) $selected['date'];
+        $time = (string) $selected['time'];
+        $modality = $this->resolveModality($pending, $message);
+
+        // RE-VERIFICAR el cupo contra la agenda ANTES de confirmar.
+        if (! $this->availability()->isSlotAvailable($professional, Carbon::parse($date), $time)) {
+            return $this->reofferAfterStaleSlot($conversation, $professional, (string) ($pending['service'] ?? ''), $type, $pending);
+        }
+
+        try {
+            if ($type === 'reschedule') {
+                $appointment = Appointment::find($pending['appointment_id'] ?? null);
+                if (! $appointment instanceof Appointment) {
+                    return $this->finish($conversation, 'No encontré la cita que querías reprogramar. ¿Me indicas de nuevo?', [
+                        'meta' => ['reason' => 'reschedule_missing'],
+                    ]);
+                }
+
+                $this->tools->reschedule($appointment, $user, $date, $time, $modality);
+
+                $reply = "Listo, reprogramé tu cita para el {$date} a las {$time}. "
+                    .'Te llegará la confirmación a tu correo.';
+
+                return $this->finish($conversation, $reply, ['meta' => ['reason' => 'rescheduled']]);
+            }
+
+            $appointment = $this->tools->book($user, $professional, $date, $time, $modality);
+
+            $reply = "¡Listo! Reservé tu cita de {$pending['service']} con {$professional->name} "
+                ."el {$date} a las {$time} ({$modality->label()}). Queda pendiente de confirmación "
+                .'y te llegará el detalle a tu correo.';
+
+            return $this->finish($conversation, $reply, [
+                'meta' => ['reason' => 'booked', 'appointment_id' => $appointment->id],
+            ]);
+        } catch (ValidationException $e) {
+            // AppointmentService re-valida y lanza si el cupo se tomó entre medio.
+            return $this->reofferAfterStaleSlot($conversation, $professional, (string) ($pending['service'] ?? ''), $type, $pending);
+        }
+    }
+
+    /**
+     * El cupo elegido ya no está disponible: mensaje grácil + re-oferta real.
+     *
+     * @param  array<string,mixed>  $pending
+     * @return array<string,mixed>
+     */
+    private function reofferAfterStaleSlot(ChatConversation $conversation, Professional $professional, string $service, string $type, array $pending): array
+    {
+        $dates = $this->tools->getAvailableDates($professional);
+        $prefix = 'Lo siento, ese cupo ya no está disponible.';
+
+        if ($dates->isEmpty()) {
+            return $this->finish($conversation, $prefix.' '.$this->noAvailabilityText(), [
+                'meta' => ['reason' => 'offer_stale'],
+            ]);
+        }
+
+        $date = $dates->first();
+        $times = $this->ensureMinimumSlots($professional, $date, $service);
+
+        if ($times === []) {
+            return $this->finish($conversation, $prefix.' '.$this->noAvailabilityText(), [
+                'meta' => ['reason' => 'offer_stale'],
+            ]);
+        }
+
+        $slots = $this->slotPayload($professional, $service, $date, $times);
+        $reply = $prefix.' Te ofrezco estas otras opciones:'."\n"
+            .$this->renderOptions($slots)
+            ."\nDime cuál prefieres y la confirmo tras verificar la disponibilidad.";
+
+        return $this->finish($conversation, $reply, [
+            'slots' => $slots,
+            'meta' => [
+                'reason' => 'slots_offered',
+                'pending' => [
+                    'type' => $type,
+                    'service' => $service,
+                    'professional_id' => $professional->id,
+                    'date' => $date,
+                    'slots' => $slots,
+                    'appointment_id' => $pending['appointment_id'] ?? null,
+                    'modality' => $pending['modality'] ?? null,
+                ],
+            ],
+        ]);
+    }
+
+    /**
+     * Cancela la próxima cita cancelable del paciente a través del agente.
+     *
+     * @return array<string,mixed>
+     */
+    private function handleCancel(ChatConversation $conversation, string $message, ?User $user): array
+    {
+        $gate = $this->bookingGate($conversation, $user);
+        if ($gate !== null) {
+            return $gate;
+        }
+
+        /** @var User $user */
+        $appointment = $this->nextCancellableAppointment($user);
+
+        if ($appointment === null) {
+            return $this->finish($conversation, 'No encontré ninguna cita que se pueda cancelar en este momento. '
+                .'Recuerda que la cancelación debe hacerse con al menos 5 días de anticipación.', [
+                    'meta' => ['reason' => 'cancel_none'],
+                ]);
+        }
+
+        try {
+            $this->tools->cancel($appointment, $user);
+
+            $when = $appointment->date->format('Y-m-d').' a las '.Carbon::parse($appointment->time)->format('H:i');
+            $reply = "Cancelé tu cita del {$when}. Si deseas, puedo ayudarte a agendar una nueva.";
+
+            return $this->finish($conversation, $reply, ['meta' => ['reason' => 'cancelled']]);
+        } catch (ValidationException $e) {
+            $reply = collect($e->errors())->flatten()->first() ?: 'No fue posible cancelar la cita.';
+
+            return $this->finish($conversation, (string) $reply, ['meta' => ['reason' => 'cancel_failed']]);
+        }
+    }
+
+    /**
+     * Inicia la reprogramación de la próxima cita del paciente ofreciendo
+     * cupos reales; un turno de seguimiento confirma la nueva fecha/hora.
+     *
+     * @return array<string,mixed>
+     */
+    private function handleReschedule(ChatConversation $conversation, string $message, ?User $user): array
+    {
+        $gate = $this->bookingGate($conversation, $user);
+        if ($gate !== null) {
+            return $gate;
+        }
+
+        /** @var User $user */
+        $appointment = $this->nextModifiableAppointment($user);
+
+        if ($appointment === null) {
+            return $this->finish($conversation, 'No encontré una cita que se pueda reprogramar. '
+                .'Solo es posible dentro de las primeras 24 horas desde que se agendó.', [
+                    'meta' => ['reason' => 'reschedule_none'],
+                ]);
+        }
+
+        $professional = $appointment->professional;
+        $dates = $this->tools->getAvailableDates($professional);
+
+        if ($dates->isEmpty()) {
+            return $this->finish($conversation, $this->noAvailabilityText(), ['meta' => ['reason' => 'no_availability']]);
+        }
+
+        $date = $dates->first();
+        $service = (string) ($professional->profession ?? $professional->specialty);
+        $times = $this->ensureMinimumSlots($professional, $date, $service);
+
+        if ($times === []) {
+            return $this->finish($conversation, $this->noAvailabilityText(), ['meta' => ['reason' => 'no_availability']]);
+        }
+
+        $slots = $this->slotPayload($professional, $service, $date, $times);
+        $reply = "Puedo reprogramar tu cita con {$professional->name}. Estas son las opciones disponibles:\n"
+            .$this->renderOptions($slots)
+            ."\nDime cuál prefieres y la reprogramo tras verificar la disponibilidad.";
+
+        $reply = $this->phrase($conversation, $message, $reply, $user);
+
+        return $this->finish($conversation, $reply, [
+            'slots' => $slots,
+            'meta' => [
+                'reason' => 'slots_offered',
+                'pending' => [
+                    'type' => 'reschedule',
+                    'service' => $service,
+                    'professional_id' => $professional->id,
+                    'appointment_id' => $appointment->id,
+                    'date' => $date,
+                    'slots' => $slots,
+                    'modality' => $appointment->modality?->value,
+                ],
+            ],
+        ]);
+    }
+
+    /**
+     * Alta en lista de espera cuando el paciente lo pide (o no hay cupo).
+     *
+     * @return array<string,mixed>
+     */
+    private function handleWaitlist(ChatConversation $conversation, string $message, ?User $user): array
+    {
+        $gate = $this->bookingGate($conversation, $user);
+        if ($gate !== null) {
+            return $gate;
+        }
+
+        /** @var User $user */
+        $service = $this->detectService($message) ?? $this->lastOfferedService($conversation);
+
+        if ($service === null) {
+            return $this->finish($conversation, 'Con gusto te anoto en la lista de espera. '
+                .'¿Para qué servicio deseas que te avise cuando se libere un cupo?', [
+                    'meta' => ['reason' => 'waitlist_need_service'],
+                ]);
+        }
+
+        $professional = $this->tools->professionalsFor($service)->first();
+
+        if (! $professional instanceof Professional) {
+            return $this->finish($conversation, $this->noAvailabilityText(), ['meta' => ['reason' => 'no_availability']]);
+        }
+
+        $this->tools->joinWaitlist($user, $professional);
+
+        $reply = "Te anoté en la lista de espera para {$service} con {$professional->name}. "
+            .'Te avisaremos apenas se libere un cupo. ¿Puedo ayudarte con algo más?';
+
+        return $this->finish($conversation, $reply, ['meta' => ['reason' => 'waitlisted']]);
+    }
+
+    private function nextCancellableAppointment(User $user): ?Appointment
+    {
+        return $user->appointmentsAsPatient()
+            ->whereIn('status', [AppointmentStatus::Pending->value, AppointmentStatus::Confirmed->value])
+            ->orderBy('date')
+            ->orderBy('time')
+            ->get()
+            ->first(fn (Appointment $a) => $a->canBeCancelledByPatient());
+    }
+
+    private function nextModifiableAppointment(User $user): ?Appointment
+    {
+        return $user->appointmentsAsPatient()
+            ->whereIn('status', [AppointmentStatus::Pending->value, AppointmentStatus::Confirmed->value])
+            ->orderBy('date')
+            ->orderBy('time')
+            ->get()
+            ->first(fn (Appointment $a) => $a->canBeModifiedByPatient());
     }
 
     /**
      * Ofrece entre 2 y 4 cupos reales para el primer profesional disponible del
-     * servicio detectado. Nunca inventa horarios ni profesionales.
+     * servicio detectado. Nunca inventa horarios ni profesionales: garantiza un
+     * mínimo de 2 opciones SOLO cuando existen de verdad (tomándolas de la
+     * siguiente fecha o de otro profesional del mismo servicio).
      *
-     * @return array{0:array<int,array<string,mixed>>,1:?string}
+     * @return array{0:array<int,array<string,mixed>>,1:?string,2:array<string,mixed>}
      */
     private function offerRealSlots(string $message): array
     {
@@ -123,47 +466,199 @@ class ChatAgentService
 
         if ($service === null) {
             return [[], 'Con gusto te ayudo a agendar. ¿Para qué servicio te gustaría la cita? '
-                .$this->servicesSummary()];
+                .$this->servicesSummary(), []];
         }
 
         $professionals = $this->tools->professionalsFor($service);
 
         if ($professionals->isEmpty()) {
-            return [[], $this->noAvailabilityText()];
+            return [[], $this->noAvailabilityText(), []];
         }
 
-        /** @var Professional $professional */
-        $professional = $professionals->first();
-        $dates = $this->tools->getAvailableDates($professional);
+        $offer = $this->buildSlotOffer($professionals, $service);
 
-        if ($dates->isEmpty()) {
-            return [[], $this->noAvailabilityText()];
+        if ($offer === null) {
+            return [[], $this->noAvailabilityText(), []];
         }
 
-        $date = $dates->first();
-        $times = $this->tools->getSlots($professional, $date);
+        [$slots, $professionalId] = $offer;
 
-        if (count($times) === 0) {
-            return [[], $this->noAvailabilityText()];
+        $reply = "Para {$service} tengo estas opciones de cupo:\n"
+            .$this->renderOptions($slots)
+            ."\nDime cuál prefieres y la confirmo tras verificar la disponibilidad.";
+
+        return [$slots, $reply, [
+            'pending' => [
+                'type' => 'book',
+                'service' => $service,
+                'professional_id' => $professionalId,
+                'slots' => $slots,
+            ],
+        ]];
+    }
+
+    /**
+     * Arma de 2 a 4 cupos reales. Prioriza el primer profesional del servicio;
+     * si en su primera fecha solo hay 1 cupo, completa con la siguiente fecha
+     * del MISMO profesional y, si aún falta, con otro profesional del servicio.
+     * Si en total solo existe 1 cupo real, lo ofrece como única opción.
+     *
+     * @param  Collection<int,Professional>  $professionals
+     * @return array{0:array<int,array<string,mixed>>,1:int}|null
+     */
+    private function buildSlotOffer(Collection $professionals, string $service): ?array
+    {
+        $collected = [];
+        $primaryId = null;
+
+        foreach ($professionals as $professional) {
+            $dates = $this->tools->getAvailableDates($professional);
+
+            foreach ($dates as $date) {
+                $times = $this->tools->getSlots($professional, $date);
+
+                foreach ($times as $time) {
+                    $collected[] = [
+                        'professional_id' => $professional->id,
+                        'professional' => $professional->name,
+                        'service' => $service,
+                        'date' => $date,
+                        'time' => $time,
+                    ];
+                    $primaryId ??= $professional->id;
+
+                    if (count($collected) >= ChatTools::MAX_SLOTS) {
+                        break 3;
+                    }
+                }
+            }
         }
 
-        $slots = array_map(fn (string $time) => [
+        if ($collected === []) {
+            return null;
+        }
+
+        return [$collected, (int) $primaryId];
+    }
+
+    /**
+     * Devuelve los cupos reales de un profesional para una fecha dada. Nunca
+     * inventa horarios: entrega solo lo que AvailabilityService reporta,
+     * recortado al máximo de 4.
+     *
+     * @return array<int,string> 'H:i'
+     */
+    private function ensureMinimumSlots(Professional $professional, string $date, string $service): array
+    {
+        return $this->tools->getSlots($professional, $date);
+    }
+
+    /**
+     * @param  array<int,string>  $times
+     * @return array<int,array<string,mixed>>
+     */
+    private function slotPayload(Professional $professional, string $service, string $date, array $times): array
+    {
+        return array_map(fn (string $time) => [
             'professional_id' => $professional->id,
             'professional' => $professional->name,
             'service' => $service,
             'date' => $date,
             'time' => $time,
         ], $times);
+    }
 
-        $optionsText = collect($times)
-            ->map(fn (string $t) => "• {$date} a las {$t}")
+    /**
+     * @param  array<int,array<string,mixed>>  $slots
+     */
+    private function renderOptions(array $slots): string
+    {
+        return collect($slots)
+            ->map(fn (array $s) => "• Opción: {$s['date']} a las {$s['time']} con {$s['professional']}")
             ->implode("\n");
+    }
 
-        $reply = "Para {$service} con {$professional->name} tengo estas opciones de cupo:\n"
-            .$optionsText
-            ."\nDime cuál prefieres y la confirmo tras verificar la disponibilidad.";
+    /**
+     * Intenta mapear el mensaje del usuario a uno de los cupos ofrecidos:
+     * por ordinal ("la primera"), por hora ("las 9:00"), por fecha, o una
+     * confirmación genérica ("sí") cuando solo hay una opción.
+     *
+     * @param  array<int,array<string,mixed>>  $slots
+     * @return array<string,mixed>|null
+     */
+    private function matchSelection(string $message, array $slots): ?array
+    {
+        $norm = $this->normalize($message);
 
-        return [$slots, $reply];
+        // 1) Por hora exacta (09:00, 9:00, 9 am, "las 9").
+        if (preg_match('/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm|h|hrs)?\b/', $norm, $m)) {
+            $hour = (int) $m[1];
+            $min = isset($m[2]) ? (int) $m[2] : 0;
+            $candidate = sprintf('%02d:%02d', $hour, $min);
+            foreach ($slots as $slot) {
+                if (($slot['time'] ?? null) === $candidate) {
+                    return $slot;
+                }
+            }
+            // Solo hora sin minutos: match por prefijo de hora.
+            foreach ($slots as $slot) {
+                if (is_string($slot['time'] ?? null) && str_starts_with($slot['time'], sprintf('%02d:', $hour))) {
+                    return $slot;
+                }
+            }
+        }
+
+        // 2) Por ordinal.
+        $ordinals = [
+            1 => ['primera', 'primero', 'uno', '1', 'la 1'],
+            2 => ['segunda', 'segundo', 'dos', '2', 'la 2'],
+            3 => ['tercera', 'tercero', 'tres', '3', 'la 3'],
+            4 => ['cuarta', 'cuarto', 'cuatro', '4', 'la 4'],
+        ];
+        foreach ($ordinals as $index => $words) {
+            foreach ($words as $w) {
+                if (str_contains($norm, $this->normalize($w)) && isset($slots[$index - 1])) {
+                    return $slots[$index - 1];
+                }
+            }
+        }
+
+        // 3) Confirmación genérica cuando solo hay una opción.
+        if (count($slots) === 1 && $this->matchesAny($message, ['si', 'sí', 'confirmo', 'dale', 'listo', 'de acuerdo', 'esa', 'ese', 'esa misma'])) {
+            return $slots[0];
+        }
+
+        return null;
+    }
+
+    private function resolveModality(array $pending, string $message): Modality
+    {
+        if ($this->matchesAny($message, ['virtual', 'en linea', 'en línea', 'videollamada', 'meet', 'remoto'])) {
+            return Modality::Virtual;
+        }
+
+        if ($this->matchesAny($message, ['presencial', 'en persona', 'en sede', 'en el consultorio'])) {
+            return Modality::InPerson;
+        }
+
+        $stored = $pending['modality'] ?? null;
+        if (is_string($stored)) {
+            return Modality::tryFrom($stored) ?? Modality::InPerson;
+        }
+
+        return Modality::InPerson;
+    }
+
+    private function lastOfferedService(ChatConversation $conversation): ?string
+    {
+        $pending = $conversation->pendingAction();
+
+        return is_array($pending) ? ($pending['service'] ?? null) : null;
+    }
+
+    private function availability(): AvailabilityService
+    {
+        return app(AvailabilityService::class);
     }
 
     /**
@@ -191,7 +686,43 @@ class ChatAgentService
 
         $reply = $this->openRouter->chat($messages);
 
-        return $reply ?? $deterministic;
+        if ($reply === null || trim($reply) === '') {
+            return $deterministic;
+        }
+
+        // Guardia anti-alucinación: el modelo solo puede REDACTAR el texto
+        // determinista, nunca introducir horarios que el código no calculó. Si
+        // la respuesta del modelo contiene una hora (HH:MM) ausente del texto
+        // verificado, se descarta y se usa el determinista tal cual.
+        if (! $this->phrasedOutputIsSafe($reply, $deterministic)) {
+            return $deterministic;
+        }
+
+        return $reply;
+    }
+
+    /**
+     * Verifica que el texto redactado por el modelo no introduzca horarios que
+     * el payload determinista no contenía. Devuelve false si diverge.
+     */
+    private function phrasedOutputIsSafe(string $modelReply, string $deterministic): bool
+    {
+        $extract = static function (string $text): array {
+            preg_match_all('/\b(\d{1,2}:\d{2})\b/', $text, $m);
+
+            return array_map(fn (string $t) => ltrim($t, '0'), $m[1] ?? []);
+        };
+
+        $allowed = $extract($deterministic);
+        $produced = $extract($modelReply);
+
+        foreach ($produced as $time) {
+            if (! in_array($time, $allowed, true)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private function deterministicReply(string $message): string
@@ -245,6 +776,31 @@ class ChatAgentService
         return $this->matchesAny($message, [
             'agendar', 'agenda', 'cita', 'reservar', 'reserva', 'turno',
             'cuándo', 'cuando puedo', 'disponibilidad', 'cupo', 'cupos', 'horario',
+        ]);
+    }
+
+    private function intendsToCancel(string $message): bool
+    {
+        return $this->matchesAny($message, [
+            'cancelar mi cita', 'cancelar la cita', 'cancelar cita', 'anular mi cita',
+            'anular la cita', 'anular cita', 'quiero cancelar', 'cancela mi cita',
+        ]);
+    }
+
+    private function intendsToReschedule(string $message): bool
+    {
+        return $this->matchesAny($message, [
+            'reprogramar', 'reagendar', 'cambiar mi cita', 'cambiar la cita',
+            'mover mi cita', 'mover la cita', 'cambiar la hora', 'cambiar la fecha',
+            'otro horario para mi cita',
+        ]);
+    }
+
+    private function intendsWaitlist(string $message): bool
+    {
+        return $this->matchesAny($message, [
+            'lista de espera', 'anotarme en lista', 'anotame en lista', 'ponme en lista',
+            'avisame cuando', 'avísame cuando', 'quiero esperar un cupo',
         ]);
     }
 
@@ -399,7 +955,7 @@ class ChatAgentService
 
     /**
      * @param  array<string,mixed>  $state
-     * @return array{reply:string, conversation_id:int, crisis:bool, escalated:bool, requires_consent:bool, slots:array<int,array<string,mixed>>}
+     * @return array{reply:string, conversation_id:int, crisis:bool, escalated:bool, requires_consent:bool, requires_login:bool, slots:array<int,array<string,mixed>>}
      */
     private function finish(ChatConversation $conversation, string $reply, array $state): array
     {
@@ -410,7 +966,8 @@ class ChatAgentService
             'conversation_id' => $conversation->id,
             'crisis' => (bool) ($state['crisis'] ?? false),
             'escalated' => (bool) ($state['escalated'] ?? false),
-            'requires_consent' => (bool) ($state['requiresConsent'] ?? false),
+            'requires_consent' => (bool) ($state['requires_consent'] ?? false),
+            'requires_login' => (bool) ($state['requires_login'] ?? false),
             'slots' => (array) ($state['slots'] ?? []),
         ];
     }

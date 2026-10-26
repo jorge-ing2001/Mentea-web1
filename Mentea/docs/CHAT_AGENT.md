@@ -288,6 +288,61 @@ herramientas deben traducir entre ambos niveles con cuidado.
 - Todo debe mantener verde `.github/workflows/ci.yml` (PHP 8.3, sqlite,
   `QUEUE_CONNECTION=sync`, `MAIL_MAILER=array`). Estilo con Laravel Pint.
 
+## 8.1 Ciclo de agendamiento conversacional
+
+El agente completa el ciclo completo dentro de la conversación, no solo la
+oferta:
+
+1. **Oferta** (`offerRealSlots`): ante intención de agendar de un paciente
+   autenticado con consentimiento, se ofrecen de **2 a 4** cupos reales. El
+   mínimo de 2 se garantiza SOLO cuando existen de verdad: si el primer
+   profesional tiene un único cupo en su primera fecha, se completan opciones
+   con sus siguientes fechas y con otros profesionales del mismo servicio. Si en
+   total solo hay 1 cupo real, se ofrece como única opción (nunca se inventa).
+2. **Estado pendiente**: la oferta se guarda en `chat_messages.meta.pending`
+   (tipo `book`/`reschedule`, servicio, profesional, fecha y la lista de cupos).
+   `ChatConversation::pendingAction()` la recupera en el turno siguiente.
+3. **Selección**: un turno de seguimiento ("la primera", "las 9:00", "sí,
+   confirmo") se mapea a un cupo concreto (`matchSelection`: por hora, por
+   ordinal, o confirmación genérica si hay una sola opción).
+4. **Re-verificación antes de confirmar**: inmediatamente antes de reservar se
+   vuelve a validar el cupo con `AvailabilityService::isSlotAvailable`; además
+   `AppointmentService::book` re-valida y lanza si el cupo se tomó entre medio.
+   En ese caso se responde "ese cupo ya no está disponible, te ofrezco estas
+   otras opciones" y se re-ofrece disponibilidad real.
+5. **Confirmar** → `AppointmentService::book` (crea la cita `Pending`).
+6. **Reprogramar** → detecta la próxima cita modificable del paciente, ofrece
+   cupos y confirma vía `AppointmentService::reschedule`.
+7. **Cancelar** → cancela la próxima cita cancelable vía
+   `AppointmentService::cancelByPatient` (con sus reglas de 5 días).
+8. **Lista de espera** → `join_waitlist` crea un `WaitlistEntry` cuando el
+   paciente lo pide o no hay cupo.
+
+Reservar / reprogramar / cancelar / lista de espera siguen exigiendo **paciente
+autenticado con consentimiento**; un invitado degrada con gracia. El meta de la
+respuesta separa `requires_login` (debe iniciar sesión) de `requires_consent`
+(debe aceptar el consentimiento) para que el widget mensajee correctamente.
+
+### Limitación conocida de la detección de crisis (fail-open)
+
+La detección de crisis y de escalado es por **coincidencia de palabras/frases**
+(lista en `config/chat.php`, normalizada sin acentos). Es un piso determinista y
+auditable, pero **falla hacia abierto**: una paráfrasis que no contenga ninguna
+palabra clave ("ya no aguanto más", "no le encuentro sentido a nada") puede no
+dispararse y caer en el flujo normal. Mitigaciones: (a) la lista se puede
+ampliar sin tocar código; (b) si en el futuro se usa clasificación asistida por
+el modelo, esta solo podrá **elevar** la bandera de crisis, nunca bajarla, para
+no debilitar la protección. Por diseño, el modelo nunca decide reglas: solo
+redacta texto ya decidido por el código.
+
+### Guardia anti-alucinación del texto redactado
+
+Cuando OpenRouter está configurado, `phrase()` le pide redactar a partir del
+texto determinista ya calculado. La salida del modelo se valida en PHP: si
+introduce un horario (HH:MM) que no estaba en el texto verificado, se descarta y
+se devuelve el determinista tal cual. Así el modelo nunca puede surfacear un
+cupo que el código no ofreció.
+
 ## 9. Resumen de reglas no negociables
 
 1. Consentimiento antes de datos personales / reserva (Ley 1581/2012).

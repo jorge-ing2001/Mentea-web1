@@ -122,6 +122,21 @@ function menteaChat() {
                     role: 'assistant',
                     content: (data && data.reply) ? data.reply : this.fallback(),
                 });
+
+                // Separa "debe iniciar sesión" de "debe aceptar consentimiento"
+                // para mensajear al invitado correctamente.
+                const flags = (data && data.flags) ? data.flags : {};
+                if (flags.requires_login) {
+                    this.messages.push({
+                        role: 'assistant',
+                        content: 'Puedes iniciar sesión o registrarte en {{ route('login') }} para agendar tu cita.',
+                    });
+                } else if (flags.requires_consent) {
+                    this.messages.push({
+                        role: 'assistant',
+                        content: 'Recuerda aceptar el consentimiento informado desde tu perfil antes de agendar.',
+                    });
+                }
             } catch (e) {
                 this.messages.push({ role: 'assistant', content: this.fallback() });
             } finally {

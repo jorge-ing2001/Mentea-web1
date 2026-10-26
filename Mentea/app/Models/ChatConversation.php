@@ -42,6 +42,31 @@ class ChatConversation extends Model
     }
 
     /**
+     * Última intención "pendiente" (oferta de cupos o de reprogramación)
+     * registrada en el meta del último mensaje del asistente. Permite que un
+     * turno de seguimiento ("la primera", "las 9:00", "sí, confirmo") se
+     * resuelva a un profesional+fecha+hora concretos.
+     *
+     * @return array<string,mixed>|null
+     */
+    public function pendingAction(): ?array
+    {
+        /** @var ChatMessage|null $last */
+        $last = $this->messages()
+            ->where('role', 'assistant')
+            ->latest('id')
+            ->first();
+
+        if ($last === null || ! is_array($last->meta)) {
+            return null;
+        }
+
+        $pending = $last->meta['pending'] ?? null;
+
+        return is_array($pending) ? $pending : null;
+    }
+
+    /**
      * Últimos N mensajes user/assistant en orden cronológico para la ventana
      * de memoria que se envía al modelo.
      */

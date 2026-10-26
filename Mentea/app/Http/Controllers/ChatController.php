@@ -49,6 +49,7 @@ class ChatController extends Controller
                     'crisis' => false,
                     'escalated' => false,
                     'requires_consent' => false,
+                    'requires_login' => false,
                     'error' => true,
                 ],
                 'slots' => [],
@@ -62,6 +63,7 @@ class ChatController extends Controller
                 'crisis' => $result['crisis'],
                 'escalated' => $result['escalated'],
                 'requires_consent' => $result['requires_consent'],
+                'requires_login' => $result['requires_login'] ?? false,
             ],
             'slots' => $result['slots'],
         ]);
