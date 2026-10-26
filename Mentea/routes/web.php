@@ -5,6 +5,7 @@ use App\Http\Controllers\Admin\DashboardController as AdminDashboard;
 use App\Http\Controllers\Admin\ProfessionalController as AdminProfessionalController;
 use App\Http\Controllers\Admin\ScheduleController as AdminScheduleController;
 use App\Http\Controllers\Api\AvailabilityController;
+use App\Http\Controllers\ChatController;
 use App\Http\Controllers\Patient\AppointmentController;
 use App\Http\Controllers\Patient\DashboardController as PatientDashboard;
 use App\Http\Controllers\Professional\DashboardController as ProfessionalDashboard;
@@ -17,6 +18,13 @@ Route::get('/citas/confirmar/{token}', [\App\Http\Controllers\Patient\Appointmen
 Route::get('/', function () {
     return view('welcome');
 })->name('home');
+
+// Agente conversacional nativo (web middleware: sesión + CSRF). Accesible a
+// invitados para información general; el agendamiento exige paciente autenticado
+// con consentimiento, lo cual se resuelve con gracia dentro del servicio.
+Route::post('/chat', [ChatController::class, 'store'])
+    ->middleware('throttle:30,1')
+    ->name('chat.send');
 
 Route::get('/dashboard', function () {
     $user = Auth::user();
