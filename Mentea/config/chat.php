@@ -134,6 +134,32 @@ return [
     ],
 
     /*
+    |--------------------------------------------------------------------------
+    | Capa 3: clasificador de crisis asistido por el modelo (ESCALATE-ONLY)
+    |--------------------------------------------------------------------------
+    |
+    | Capa OPCIONAL que SOLO puede ELEVAR la señal de crisis cuando las dos
+    | capas deterministas (palabras clave + regex de paráfrasis) NO dispararon.
+    | Nunca puede bajar un hit determinista: ChatAgentService::detectsCrisis
+    | hace short-circuit y ni siquiera consulta al modelo si una capa
+    | determinista ya marcó crisis. Es fail-safe por defecto: si se desactiva,
+    | no hay OPENROUTER_API_KEY, falla la red o la respuesta es inparseable, el
+    | resultado determinista gobierna y la app nunca se cae.
+    |
+    | Toggle auditable: CHAT_CRISIS_CLASSIFIER=false lo desactiva por completo
+    | (las capas deterministas siguen funcionando sin key ni red).
+    */
+    'crisis_classifier_enabled' => filter_var(env('CHAT_CRISIS_CLASSIFIER', true), FILTER_VALIDATE_BOOLEAN),
+
+    'crisis_classifier_prompt' => 'Eres un clasificador de seguridad para un hospital de salud mental en '
+        .'Colombia. Analiza el ÚLTIMO mensaje del usuario y determina si expresa una crisis de salud mental: '
+        .'ideación suicida, autolesión, deseo de morir o desaparecer, desesperanza severa o riesgo inminente '
+        .'de daño a sí mismo. Interpreta paráfrasis, jerga y lenguaje indirecto en español. Responde '
+        .'EXCLUSIVAMENTE con un JSON de una línea y nada más: {"crisis": true} si detectas crisis o riesgo, '
+        .'o {"crisis": false} si no. Ante la duda razonable, prefiere {"crisis": true}. No expliques ni '
+        .'añadas texto fuera del JSON.',
+
+    /*
     | Heurística de escalado a humano (preguntas clínicas / fuera de alcance /
     | menores o acudientes). El agente no diagnostica ni aconseja.
     */

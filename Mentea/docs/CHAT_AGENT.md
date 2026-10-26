@@ -323,34 +323,55 @@ autenticado con consentimiento**; un invitado degrada con gracia. El meta de la
 respuesta separa `requires_login` (debe iniciar sesión) de `requires_consent`
 (debe aceptar el consentimiento) para que el widget mensajee correctamente.
 
-### Detección de crisis reforzada (dos capas, sesgo a fallar-seguro)
+### Detección de crisis reforzada (tres capas, sesgo a fallar-seguro)
 
-La detección de crisis se evalúa en **dos capas**, ambas en PHP y antes de
-cualquier otra regla (`detectsCrisis`):
+La detección de crisis se evalúa en **tres capas**, todas orquestadas en PHP y
+antes de cualquier otra regla (`detectsCrisis`). El **orden** es lo que hace el
+diseño seguro: las capas deterministas son el piso auditable y el modelo solo
+puede **elevar** una ausencia, nunca bajar un hit.
 
-1. **Piso determinista** — lista de palabras/frases exactas
-   (`config('chat.crisis_keywords')`, normalizada sin acentos). Un match aquí
-   **siempre** dispara y es incondicional: ninguna negación ni capa posterior
-   puede anularlo. Es auditable y ampliable sin tocar código.
-2. **Capa de refuerzo por paráfrasis** — expresiones regulares sobre el texto
-   normalizado (`config('chat.crisis_patterns')`) que capturan construcciones
-   que la lista exacta no cubre ("ya no aguanto más", "ya no le veo sentido a
-   nada", "quisiera no despertar", "todos estarían mejor sin mí"). Esta capa
-   **solo puede elevar** la señal de crisis. Para acotar falsos positivos se
-   descarta únicamente ante una **negación directa** de la ideación
+1. **Piso determinista (siempre dispara, incondicional)** — lista de
+   palabras/frases exactas (`config('chat.crisis_keywords')`, normalizada sin
+   acentos). Un match aquí **siempre** dispara: ninguna negación, capa posterior
+   ni el modelo puede anularlo. Es auditable y ampliable sin tocar código.
+2. **Capa de refuerzo por paráfrasis (escalate-only, atenuada por negación)** —
+   expresiones regulares sobre el texto normalizado
+   (`config('chat.crisis_patterns')`) que capturan construcciones que la lista
+   exacta no cubre ("ya no aguanto más", "ya no le veo sentido a nada",
+   "quisiera no despertar", "todos estarían mejor sin mí"). Esta capa **solo
+   eleva** la señal. Para acotar falsos positivos se descarta únicamente ante
+   una **negación directa** de la ideación
    (`config('chat.crisis_pattern_negations')`, p.ej. "no quiero hacerme daño");
    esa atenuación aplica **solo a la capa 2**, nunca a la capa 1.
+3. **Clasificador asistido por el modelo (OPCIONAL, escalate-only)** — se
+   consulta **únicamente** cuando las dos capas deterministas NO dispararon
+   (`ChatAgentService::classifierDetectsCrisis` vía `OpenRouterClient::classify`
+   con `config('chat.crisis_classifier_prompt')`). Si cualquiera de las capas
+   deterministas ya marcó crisis, `detectsCrisis` retorna `true` de inmediato y
+   el modelo **no se consulta siquiera**: así el modelo jamás puede des-marcar
+   un hit de palabra/patrón (asimetría que preserva la seguridad). El modelo
+   **solo puede elevar** una paráfrasis muy indirecta que ni la lista ni los
+   patrones capturen. Se activa/desactiva con el toggle auditable
+   `config('chat.crisis_classifier_enabled')` (`CHAT_CRISIS_CLASSIFIER`).
 
 El diseño prioriza deliberadamente el **falso positivo** sobre el falso negativo:
 ante la duda, entregar el protocolo de crisis es preferible a enrutar a una
 persona en riesgo hacia el flujo de agendamiento.
 
-**Límite que subsiste (fail-open residual):** sigue siendo detección basada en
-patrones. Una paráfrasis muy indirecta que no contenga ni palabra clave ni
-patrón podría no dispararse. Si en el futuro se añade clasificación asistida por
-el modelo, esta solo podrá **elevar** la bandera (nunca bajarla), preservando el
-piso determinista. Por diseño, el modelo nunca decide reglas: solo redacta texto
-ya decidido por el código.
+**Fail-safe end-to-end (sin key / sin red):** el clasificador es puramente
+aditivo. Si el toggle está desactivado, no hay `OPENROUTER_API_KEY`, la red o el
+HTTP fallan, o la respuesta es inparseable o no-crisis, se cae al **resultado
+determinista** (palabras clave + regex) sin lanzar excepción y sin dejar pasar
+un hit determinista. Con cero configuración el agente detecta crisis con las dos
+capas deterministas, exactamente como antes.
+
+**Límite residual (mitigado, ya no solo documentado):** la capa 3 mitiga el
+hueco de "fail-open" de la detección basada solo en patrones: una paráfrasis muy
+indirecta que no contenga ni palabra clave ni patrón ahora **puede** elevarse
+por el clasificador cuando OpenRouter está configurado. Cuando no lo está, el
+comportamiento es el piso determinista. En todos los casos el modelo **nunca
+decide reglas ni baja la bandera**: solo puede elevar una ausencia; el código
+manda, el modelo solo redacta/clasifica dentro de esa asimetría.
 
 ### Guardia anti-alucinación del texto redactado
 

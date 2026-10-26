@@ -462,6 +462,97 @@ class ChatAgentServiceTest extends TestCase
         $this->assertStringContainsString('con gusto te ayudo a agendar', $result['reply']);
     }
 
+    /**
+     * (a) Capa 1 (palabra clave) dispara crisis AUNQUE el clasificador del
+     * modelo no esté disponible (sin OPENROUTER_API_KEY): no se hace ninguna
+     * llamada de red y no se agenda nada. El piso determinista gobierna solo.
+     */
+    public function test_keyword_crisis_flags_without_classifier_and_sends_no_http(): void
+    {
+        config(['services.openrouter.key' => null]);
+        Http::fake();
+
+        $this->seedProfessional();
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        $result = $this->agent()->handle(
+            $conversation,
+            'Quiero quitarme la vida y agendar una cita de psicología',
+            $patient
+        );
+
+        $this->assertTrue($result['crisis']);
+        $this->assertEmpty($result['slots']);
+        $this->assertDatabaseCount('appointments', 0);
+        Http::assertNothingSent();
+    }
+
+    /**
+     * (b) Capa 3 (clasificador del modelo) ELEVA una paráfrasis que NO cae en
+     * las capas deterministas (ni palabra clave ni patrón regex). Con la key
+     * configurada y Http::fake() devolviendo {"crisis": true}, el turno se
+     * marca como crisis y no agenda nada.
+     */
+    public function test_model_classifier_escalates_deterministic_miss(): void
+    {
+        config(['services.openrouter.key' => 'test-key']);
+        $this->fakeOpenRouterReply('{"crisis": true}');
+
+        $this->seedProfessional();
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        // Paráfrasis muy indirecta: no contiene palabra clave de la capa 1 ni
+        // coincide con los patrones regex de la capa 2.
+        $message = 'Siento que soy una carga para mi familia y preferiria no estar';
+
+        // Pre-condición: el mensaje no debe disparar las capas deterministas.
+        config(['chat.crisis_classifier_enabled' => false]);
+        $deterministic = $this->agent()->handle($this->conversationFor($patient), $message, $patient);
+        $this->assertFalse($deterministic['crisis'], 'El mensaje no debe caer en capas deterministas');
+
+        // Ahora con el clasificador activo, el modelo eleva la señal.
+        config(['chat.crisis_classifier_enabled' => true]);
+        $result = $this->agent()->handle($conversation, $message, $patient);
+
+        $this->assertTrue($result['crisis']);
+        $this->assertTrue($result['escalated']);
+        $this->assertEmpty($result['slots']);
+        $this->assertDatabaseCount('appointments', 0);
+    }
+
+    /**
+     * (c) El clasificador NUNCA puede bajar un hit determinista: con un mensaje
+     * de palabra clave (capa 1) Y un Http::fake() que clasifica NO-crisis, la
+     * crisis sigue marcada Y el clasificador NO se consulta (short-circuit
+     * determinista => cero HTTP). Esta prueba falla si se revierte la asimetría.
+     */
+    public function test_model_classifier_cannot_downgrade_keyword_hit(): void
+    {
+        config(['services.openrouter.key' => 'test-key']);
+        // El modelo diría "no crisis", pero no debe ser consultado siquiera.
+        $this->fakeOpenRouterReply('{"crisis": false}');
+
+        $this->seedProfessional();
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        $result = $this->agent()->handle(
+            $conversation,
+            'Ya no quiero vivir, quiero quitarme la vida',
+            $patient
+        );
+
+        $this->assertTrue($result['crisis']);
+        $this->assertTrue($result['escalated']);
+        $this->assertEmpty($result['slots']);
+        $this->assertDatabaseCount('appointments', 0);
+
+        // La capa 1 hace short-circuit: el clasificador no se consulta.
+        Http::assertNothingSent();
+    }
+
     public function test_clinical_question_escalates_to_human(): void
     {
         $patient = $this->patient(withConsent: true);

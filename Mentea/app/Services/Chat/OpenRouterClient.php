@@ -72,4 +72,20 @@ class OpenRouterClient
             return null;
         }
     }
+
+    /**
+     * Clasifica un mensaje en crisis / no-crisis consultando al modelo. Es una
+     * llamada dedicada (prompt de clasificación + mensaje del usuario) que
+     * devuelve el contenido crudo del asistente para que el llamador lo parsee,
+     * o null si no hay key / falla la red / respuesta vacía. Reusa `chat()`
+     * (mismo cliente Illuminate\Http) para mantener una sola ruta HTTP falseable
+     * con Http::fake() y la misma degradación grácil (nunca lanza).
+     */
+    public function classify(string $systemPrompt, string $message): ?string
+    {
+        return $this->chat([
+            ['role' => 'system', 'content' => $systemPrompt],
+            ['role' => 'user', 'content' => $message],
+        ]);
+    }
 }

@@ -822,17 +822,26 @@ class ChatAgentService
     // ---- Detección (heurísticas en español) ------------------------------
 
     /**
-     * Detección de crisis en dos capas, con sesgo deliberado a FALLAR-SEGURO
-     * (preferir un falso positivo a dejar pasar una crisis real):
+     * Detección de crisis en TRES capas, con sesgo deliberado a FALLAR-SEGURO
+     * (preferir un falso positivo a dejar pasar una crisis real). El orden es
+     * crítico y es lo que hace el diseño seguro: el modelo SOLO puede ELEVAR la
+     * bandera cuando las capas deterministas no la dispararon; NUNCA puede
+     * bajarla.
      *
      *   1. Piso determinista: lista de palabras/frases exactas
      *      (config('chat.crisis_keywords')). Un match aquí SIEMPRE dispara y
-     *      NO puede ser anulado por nada (ni por negaciones).
-     *   2. Capa de refuerzo: expresiones regulares sobre el texto normalizado
-     *      (config('chat.crisis_patterns')) que capturan paráfrasis. Esta capa
-     *      SOLO puede ELEVAR la señal; se descarta únicamente cuando el mensaje
-     *      contiene una negación directa de la ideación (config
-     *      'chat.crisis_pattern_negations'), para acotar falsos positivos.
+     *      NO puede ser anulado por nada (ni por negaciones ni por el modelo).
+     *   2. Capa de refuerzo determinista: expresiones regulares sobre el texto
+     *      normalizado (config('chat.crisis_patterns')) que capturan paráfrasis.
+     *      Esta capa SOLO eleva la señal; se descarta únicamente ante una
+     *      negación directa de la ideación (config 'chat.crisis_pattern_negations').
+     *   3. Clasificador asistido por el modelo (OPCIONAL, solo eleva): se
+     *      consulta ÚNICAMENTE cuando las dos capas deterministas NO dispararon.
+     *      Si cualquiera de las capas deterministas ya marcó crisis, se retorna
+     *      true de inmediato y el modelo NO se consulta siquiera, de modo que el
+     *      modelo jamás puede des-marcar un hit de palabra/patrón. Si no hay
+     *      key, hay error de red/HTTP, respuesta inparseable, o el clasificador
+     *      responde no-crisis, se cae al resultado determinista (no eleva).
      */
     private function detectsCrisis(string $message): bool
     {
@@ -843,7 +852,74 @@ class ChatAgentService
 
         // Capa 2: paráfrasis por regex. Solo eleva la señal; puede atenuarse
         // ante una negación directa, nunca anula la capa 1 (ya evaluada arriba).
-        return $this->matchesCrisisPattern($message);
+        if ($this->matchesCrisisPattern($message)) {
+            return true;
+        }
+
+        // Capa 3: clasificador del modelo, SOLO para elevar una ausencia de las
+        // capas deterministas. Nunca se alcanza si una capa determinista
+        // disparó (short-circuit arriba), así el modelo jamás baja la bandera.
+        return $this->classifierDetectsCrisis($message);
+    }
+
+    /**
+     * Capa 3 (escalate-only): consulta al modelo para clasificar el mensaje
+     * como crisis / no-crisis en contexto de salud mental colombiano. Solo se
+     * invoca cuando las capas deterministas no dispararon. Fail-safe total:
+     *
+     *   - Si el toggle 'chat.crisis_classifier_enabled' está desactivado,
+     *     o OpenRouter no está configurado (sin OPENROUTER_API_KEY), NO se
+     *     hace ninguna llamada de red y se devuelve false (no eleva).
+     *   - Cualquier fallo de red/HTTP o respuesta vacía => OpenRouterClient
+     *     devuelve null => false.
+     *   - Respuesta inparseable o clasificación no-crisis => false.
+     *
+     * Nunca lanza, nunca baja una señal determinista (no puede: solo se llega
+     * aquí si ninguna capa determinista disparó).
+     */
+    private function classifierDetectsCrisis(string $message): bool
+    {
+        if (! (bool) config('chat.crisis_classifier_enabled', true)) {
+            return false;
+        }
+
+        if (! $this->openRouter->isConfigured()) {
+            return false;
+        }
+
+        $raw = $this->openRouter->classify((string) config('chat.crisis_classifier_prompt', ''), $message);
+
+        if (! is_string($raw) || trim($raw) === '') {
+            return false;
+        }
+
+        return $this->parseCrisisClassification($raw);
+    }
+
+    /**
+     * Parsea la salida del clasificador buscando una señal de crisis. Acepta
+     * un JSON {"crisis": true|false} o un token simple (CRISIS / NO_CRISIS /
+     * SI / NO). Conservador: solo devuelve true ante una señal afirmativa
+     * explícita; cualquier otra cosa (inparseable, ambigua, negativa) => false.
+     */
+    private function parseCrisisClassification(string $raw): bool
+    {
+        $text = trim($raw);
+
+        // 1) Intento JSON: {"crisis": true}.
+        $decoded = json_decode($text, true);
+        if (is_array($decoded) && array_key_exists('crisis', $decoded)) {
+            return filter_var($decoded['crisis'], FILTER_VALIDATE_BOOLEAN);
+        }
+
+        // 2) Token afirmativo explícito en texto normalizado.
+        $normalized = $this->normalize($text);
+
+        if ($normalized === 'no_crisis' || $normalized === 'no crisis' || $normalized === 'no') {
+            return false;
+        }
+
+        return in_array($normalized, ['crisis', 'si', 'true'], true);
     }
 
     private function matchesCrisisPattern(string $message): bool
