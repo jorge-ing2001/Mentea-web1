@@ -1,4 +1,4 @@
-```php
+
 <?php
 
 use App\Http\Middleware\AuditRequestMiddleware;
@@ -37,4 +37,3 @@ return Application::configure(basePath: dirname(__DIR__))
         );
     })
     ->create();
-```
