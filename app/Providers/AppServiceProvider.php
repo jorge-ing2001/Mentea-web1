@@ -20,12 +20,12 @@ class AppServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
-        // Forzar HTTPS únicamente en producción
+        // Forzar HTTPS en producción
         if ($this->app->environment('production')) {
             URL::forceScheme('https');
         }
 
-        // Permitir todas las acciones al superadministrador
+        // Permisos del superadministrador
         Gate::before(function ($user, $ability) {
             return method_exists($user, 'hasRole')
                 && $user->hasRole('super_admin')
@@ -33,8 +33,9 @@ class AppServiceProvider extends ServiceProvider
                     : null;
         });
 
-        // Registrar políticas de autorización
+        // Políticas de autorización
         Gate::policy(Appointment::class, AppointmentPolicy::class);
         Gate::policy(Professional::class, ProfessionalPolicy::class);
     }
 }
+```
