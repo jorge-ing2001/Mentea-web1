@@ -15,6 +15,7 @@ use App\Services\Chat\ChatAgentService;
 use App\Services\Chat\ChatTools;
 use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Http;
 use PHPUnit\Framework\Attributes\DataProvider;
 use Tests\TestCase;
@@ -33,6 +34,25 @@ class ChatAgentServiceTest extends TestCase
     private function agent(): ChatAgentService
     {
         return app(ChatAgentService::class);
+    }
+
+    /**
+     * Reemplaza el fake vacío de setUp por uno que devuelve una respuesta de
+     * OpenRouter concreta. setUp registra un catch-all vacío; para que este
+     * stub tenga efecto se descarta la instancia previa del cliente HTTP.
+     */
+    private function fakeOpenRouterReply(string $content): void
+    {
+        Http::clearResolvedInstances();
+        $this->app->forgetInstance(Factory::class);
+
+        Http::fake([
+            '*' => Http::response([
+                'choices' => [[
+                    'message' => ['content' => $content],
+                ]],
+            ], 200),
+        ]);
     }
 
     private function conversationFor(?User $user = null): ChatConversation
@@ -304,6 +324,142 @@ class ChatAgentServiceTest extends TestCase
         $this->assertTrue($result['requires_consent']);
         $this->assertEmpty($result['slots']);
         $this->assertDatabaseCount('appointments', 0);
+    }
+
+    /**
+     * Profesional cuyo horario rinde exactamente UN cupo por día (ventana de
+     * 45 min). Sirve para probar que la reprogramación sigue reuniendo >= 2
+     * opciones reales a través de fechas distintas, sin inventar.
+     */
+    private function seedSingleSlotProfessional(): Professional
+    {
+        $pro = Professional::create([
+            'name' => 'Dr. Unico',
+            'specialty' => 'Psicología Clínica',
+            'profession' => 'Psicología',
+            'email' => 'pro-unico@test.com',
+            'is_available' => true,
+            'appointment_duration_minutes' => 45,
+        ]);
+
+        foreach (range(1, 7) as $day) {
+            Schedule::create([
+                'professional_id' => $pro->id,
+                'day_of_week' => $day,
+                'start_time' => '09:00',
+                'end_time' => '09:45',
+                'is_active' => true,
+            ]);
+        }
+
+        return $pro;
+    }
+
+    /**
+     * Regresión del piso 2-4 en la ruta de REPROGRAMACIÓN: aunque la primera
+     * fecha disponible del profesional tenga un solo cupo real, el agente debe
+     * ofrecer >= 2 opciones reales tomándolas de fechas posteriores (mismo
+     * profesional) o de otro profesional del servicio, sin inventar ninguna.
+     */
+    public function test_reschedule_offers_at_least_two_real_slots_across_dates(): void
+    {
+        $pro = $this->seedSingleSlotProfessional();
+        $patient = $this->patient(withConsent: true);
+
+        // Cita existente (recién creada => reprogramable) en el primer cupo real.
+        $tools = app(ChatTools::class);
+        $firstDate = $tools->getAvailableDates($pro)->first();
+        $firstTime = $tools->getSlots($pro, $firstDate)[0];
+        $appointment = $tools->book($patient, $pro, $firstDate, $firstTime, Modality::InPerson);
+
+        $conversation = $this->conversationFor($patient);
+        $result = $this->agent()->handle($conversation, 'Quiero reprogramar mi cita', $patient);
+
+        $slots = $result['slots'];
+
+        // El piso 2-4 debe honrarse pese a 1 cupo por fecha.
+        $this->assertGreaterThanOrEqual(2, count($slots), 'La reprogramación debe ofrecer >= 2 opciones reales');
+        $this->assertLessThanOrEqual(4, count($slots));
+
+        // Cada cupo ofrecido DEBE ser real según AvailabilityService (no inventado)
+        // y NO puede coincidir con el cupo ya ocupado por la cita existente.
+        $availability = app(AvailabilityService::class);
+        foreach ($slots as $slot) {
+            $this->assertTrue(
+                $availability->isSlotAvailable($pro, Carbon::parse($slot['date']), $slot['time']),
+                "El cupo {$slot['date']} {$slot['time']} no es real"
+            );
+            $this->assertFalse(
+                $slot['date'] === $appointment->date->format('Y-m-d') && $slot['time'] === $firstTime,
+                'No debe ofrecerse el cupo ya ocupado por la cita'
+            );
+        }
+
+        // Las opciones deben estar en fechas distintas (el profesional solo
+        // tiene 1 cupo por día), confirmando la colección multi-fecha.
+        $this->assertGreaterThanOrEqual(2, collect($slots)->pluck('date')->unique()->count());
+    }
+
+    /**
+     * La guardia anti-alucinación descarta una respuesta del modelo que invente
+     * un NOMBRE de profesional ausente del texto determinista: se devuelve el
+     * determinista, nunca el nombre fabricado.
+     */
+    public function test_phrasing_guard_discards_fabricated_professional_name(): void
+    {
+        config(['services.openrouter.key' => 'test-key']);
+        $this->fakeOpenRouterReply('Para Psicología tengo cupos con Dra. Fantasma Inventada; dime cuál prefieres.');
+
+        $this->seedProfessional(); // Dra. Prueba
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        $result = $this->agent()->handle($conversation, 'Quiero agendar psicología', $patient);
+
+        // El modelo fabricó "Fantasma Inventada": se descarta y se usa el
+        // determinista (que menciona a la Dra. Prueba, no a la inventada).
+        $this->assertStringNotContainsString('Fantasma', $result['reply']);
+        $this->assertStringNotContainsString('Inventada', $result['reply']);
+        $this->assertStringContainsString('Prueba', $result['reply']);
+    }
+
+    /**
+     * La guardia anti-alucinación descarta una respuesta del modelo que invente
+     * una FECHA (YYYY-MM-DD) ausente del texto determinista.
+     */
+    public function test_phrasing_guard_discards_fabricated_date(): void
+    {
+        config(['services.openrouter.key' => 'test-key']);
+        $this->fakeOpenRouterReply('Te puedo agendar el 2099-12-31 a las 09:00. ¿Confirmas?');
+
+        $this->seedProfessional();
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        $result = $this->agent()->handle($conversation, 'Quiero agendar psicología', $patient);
+
+        // La fecha 2099-12-31 no está en el determinista: respuesta descartada.
+        $this->assertStringNotContainsString('2099-12-31', $result['reply']);
+        // El determinista real ofrece cupos; debe aparecer el texto verificado.
+        $this->assertStringContainsString('Opción', $result['reply']);
+    }
+
+    /**
+     * Control: cuando el modelo redacta SIN inventar datos (solo reformula el
+     * texto verificado), su respuesta SÍ se conserva.
+     */
+    public function test_phrasing_guard_keeps_faithful_model_reply(): void
+    {
+        config(['services.openrouter.key' => 'test-key']);
+        $this->fakeOpenRouterReply('Claro, con gusto te ayudo a agendar. ¿En qué más puedo apoyarte?');
+
+        $this->seedProfessional();
+        $patient = $this->patient(withConsent: true);
+        $conversation = $this->conversationFor($patient);
+
+        $result = $this->agent()->handle($conversation, 'Hola, buenos días', $patient);
+
+        $this->assertStringContainsString('con gusto te ayudo a agendar', $result['reply']);
     }
 
     public function test_clinical_question_escalates_to_human(): void

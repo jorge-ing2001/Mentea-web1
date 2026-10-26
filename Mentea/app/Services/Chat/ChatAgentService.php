@@ -258,25 +258,18 @@ class ChatAgentService
      */
     private function reofferAfterStaleSlot(ChatConversation $conversation, Professional $professional, string $service, string $type, array $pending): array
     {
-        $dates = $this->tools->getAvailableDates($professional);
         $prefix = 'Lo siento, ese cupo ya no está disponible.';
 
-        if ($dates->isEmpty()) {
+        // Mismo piso 2-4 que el flujo de oferta: primero el profesional actual,
+        // luego otros del mismo servicio. Cupos siempre reales.
+        $slots = $this->collectRescheduleSlots($professional, $service);
+
+        if ($slots === []) {
             return $this->finish($conversation, $prefix.' '.$this->noAvailabilityText(), [
                 'meta' => ['reason' => 'offer_stale'],
             ]);
         }
 
-        $date = $dates->first();
-        $times = $this->ensureMinimumSlots($professional, $date, $service);
-
-        if ($times === []) {
-            return $this->finish($conversation, $prefix.' '.$this->noAvailabilityText(), [
-                'meta' => ['reason' => 'offer_stale'],
-            ]);
-        }
-
-        $slots = $this->slotPayload($professional, $service, $date, $times);
         $reply = $prefix.' Te ofrezco estas otras opciones:'."\n"
             .$this->renderOptions($slots)
             ."\nDime cuál prefieres y la confirmo tras verificar la disponibilidad.";
@@ -289,7 +282,7 @@ class ChatAgentService
                     'type' => $type,
                     'service' => $service,
                     'professional_id' => $professional->id,
-                    'date' => $date,
+                    'date' => $slots[0]['date'],
                     'slots' => $slots,
                     'appointment_id' => $pending['appointment_id'] ?? null,
                     'modality' => $pending['modality'] ?? null,
@@ -358,21 +351,16 @@ class ChatAgentService
         }
 
         $professional = $appointment->professional;
-        $dates = $this->tools->getAvailableDates($professional);
-
-        if ($dates->isEmpty()) {
-            return $this->finish($conversation, $this->noAvailabilityText(), ['meta' => ['reason' => 'no_availability']]);
-        }
-
-        $date = $dates->first();
         $service = (string) ($professional->profession ?? $professional->specialty);
-        $times = $this->ensureMinimumSlots($professional, $date, $service);
 
-        if ($times === []) {
+        // Mismo piso 2-4 que el flujo de oferta: primero el profesional de la
+        // cita, luego otros del mismo servicio. Cupos siempre reales.
+        $slots = $this->collectRescheduleSlots($professional, $service);
+
+        if ($slots === []) {
             return $this->finish($conversation, $this->noAvailabilityText(), ['meta' => ['reason' => 'no_availability']]);
         }
 
-        $slots = $this->slotPayload($professional, $service, $date, $times);
         $reply = "Puedo reprogramar tu cita con {$professional->name}. Estas son las opciones disponibles:\n"
             .$this->renderOptions($slots)
             ."\nDime cuál prefieres y la reprogramo tras verificar la disponibilidad.";
@@ -388,7 +376,7 @@ class ChatAgentService
                     'service' => $service,
                     'professional_id' => $professional->id,
                     'appointment_id' => $appointment->id,
-                    'date' => $date,
+                    'date' => $slots[0]['date'],
                     'slots' => $slots,
                     'modality' => $appointment->modality?->value,
                 ],
@@ -508,8 +496,30 @@ class ChatAgentService
      */
     private function buildSlotOffer(Collection $professionals, string $service): ?array
     {
+        $collected = $this->collectRealSlots($professionals, $service);
+
+        if ($collected === []) {
+            return null;
+        }
+
+        return [$collected, (int) $collected[0]['professional_id']];
+    }
+
+    /**
+     * Colecciona entre 1 y MAX_SLOTS cupos REALES recorriendo los profesionales
+     * en el orden recibido, y para cada uno todas sus fechas disponibles. Nunca
+     * inventa horarios: cada cupo proviene de AvailabilityService (vía
+     * ChatTools::getSlots). El orden de la colección determina la prioridad: el
+     * llamador pasa el profesional preferido primero (p.ej. el de la cita a
+     * reprogramar), seguido de otros profesionales del mismo servicio. Si en
+     * total solo existe 1 cupo real, se devuelve esa única opción (sin rellenar).
+     *
+     * @param  Collection<int,Professional>  $professionals
+     * @return array<int,array<string,mixed>>
+     */
+    private function collectRealSlots(Collection $professionals, string $service): array
+    {
         $collected = [];
-        $primaryId = null;
 
         foreach ($professionals as $professional) {
             $dates = $this->tools->getAvailableDates($professional);
@@ -525,47 +535,33 @@ class ChatAgentService
                         'date' => $date,
                         'time' => $time,
                     ];
-                    $primaryId ??= $professional->id;
 
                     if (count($collected) >= ChatTools::MAX_SLOTS) {
-                        break 3;
+                        return $collected;
                     }
                 }
             }
         }
 
-        if ($collected === []) {
-            return null;
-        }
-
-        return [$collected, (int) $primaryId];
+        return $collected;
     }
 
     /**
-     * Devuelve los cupos reales de un profesional para una fecha dada. Nunca
-     * inventa horarios: entrega solo lo que AvailabilityService reporta,
-     * recortado al máximo de 4.
+     * Cupos reales para reprogramar / re-ofrecer, honrando el mismo piso 2-4 que
+     * el flujo de oferta: toma primero al profesional indicado (el de la cita) y
+     * luego a otros profesionales del MISMO servicio, hasta MAX_SLOTS. Nunca
+     * inventa: si solo existe 1 cupo real en total, devuelve esa única opción.
      *
-     * @return array<int,string> 'H:i'
-     */
-    private function ensureMinimumSlots(Professional $professional, string $date, string $service): array
-    {
-        return $this->tools->getSlots($professional, $date);
-    }
-
-    /**
-     * @param  array<int,string>  $times
      * @return array<int,array<string,mixed>>
      */
-    private function slotPayload(Professional $professional, string $service, string $date, array $times): array
+    private function collectRescheduleSlots(Professional $professional, string $service): array
     {
-        return array_map(fn (string $time) => [
-            'professional_id' => $professional->id,
-            'professional' => $professional->name,
-            'service' => $service,
-            'date' => $date,
-            'time' => $time,
-        ], $times);
+        $ordered = collect([$professional])
+            ->concat($this->tools->professionalsFor($service)
+                ->reject(fn (Professional $p) => $p->id === $professional->id))
+            ->values();
+
+        return $this->collectRealSlots($ordered, $service);
     }
 
     /**
@@ -691,9 +687,11 @@ class ChatAgentService
         }
 
         // Guardia anti-alucinación: el modelo solo puede REDACTAR el texto
-        // determinista, nunca introducir horarios que el código no calculó. Si
-        // la respuesta del modelo contiene una hora (HH:MM) ausente del texto
-        // verificado, se descarta y se usa el determinista tal cual.
+        // determinista, nunca introducir datos que el código no calculó. Si la
+        // respuesta del modelo introduce una hora (HH:MM), una fecha
+        // (YYYY-MM-DD) o un nombre de profesional (anclado a un título, p.ej.
+        // "Dra. Prueba") ausente del texto verificado, se descarta y se usa el
+        // determinista tal cual.
         if (! $this->phrasedOutputIsSafe($reply, $deterministic)) {
             return $deterministic;
         }
@@ -702,27 +700,89 @@ class ChatAgentService
     }
 
     /**
-     * Verifica que el texto redactado por el modelo no introduzca horarios que
-     * el payload determinista no contenía. Devuelve false si diverge.
+     * Verifica que el texto redactado por el modelo no introduzca datos
+     * estructurados ausentes del payload determinista. Comprueba tres clases de
+     * token que el modelo solo podría obtener del texto verificado:
+     *
+     *   - Horas de reloj (HH:MM): un cupo que la agenda nunca ofreció.
+     *   - Fechas ISO (YYYY-MM-DD): una fecha corrida o inventada.
+     *   - Nombres de profesional: tokens capitalizados (incluye títulos como
+     *     "Dra."/"Dr.") que no aparezcan en el determinista.
+     *
+     * Es deliberadamente conservadora: solo marca tokens que "parecen" datos
+     * estructurados, para no rechazar la redacción normal en español. Devuelve
+     * false si la respuesta del modelo diverge del payload verificado.
      */
     private function phrasedOutputIsSafe(string $modelReply, string $deterministic): bool
     {
-        $extract = static function (string $text): array {
+        $extractTimes = static function (string $text): array {
             preg_match_all('/\b(\d{1,2}:\d{2})\b/', $text, $m);
 
             return array_map(fn (string $t) => ltrim($t, '0'), $m[1] ?? []);
         };
 
-        $allowed = $extract($deterministic);
-        $produced = $extract($modelReply);
+        $extractDates = static function (string $text): array {
+            preg_match_all('/\b(\d{4}-\d{2}-\d{2})\b/', $text, $m);
 
-        foreach ($produced as $time) {
-            if (! in_array($time, $allowed, true)) {
+            return $m[1] ?? [];
+        };
+
+        // Horas.
+        foreach ($extractTimes($modelReply) as $time) {
+            if (! in_array($time, $extractTimes($deterministic), true)) {
+                return false;
+            }
+        }
+
+        // Fechas ISO.
+        foreach ($extractDates($modelReply) as $date) {
+            if (! in_array($date, $extractDates($deterministic), true)) {
+                return false;
+            }
+        }
+
+        // Nombres de profesional: se anclan a un título clínico ("Dra.", "Dr.",
+        // "Lic.", "Psic.", etc.) seguido del nombre. Cada nombre así construido
+        // en la respuesta del modelo debe existir, normalizado, en el
+        // determinista. Es conservador a propósito: NO inspecciona palabras
+        // capitalizadas sueltas (inicio de oración, etc.), solo nombres que
+        // siguen a un título, que es la única forma en que el agente nombra a
+        // un profesional.
+        $allowedNames = $this->titledProfessionalNames($deterministic);
+
+        foreach ($this->titledProfessionalNames($modelReply) as $name) {
+            if (! in_array($name, $allowedNames, true)) {
                 return false;
             }
         }
 
         return true;
+    }
+
+    /**
+     * Extrae nombres de profesional anclados a un título clínico abreviado
+     * (p.ej. "Dra. Prueba", "Dr. Juan Pérez"). Devuelve el nombre normalizado
+     * (sin el título, minúsculas, sin tildes) para comparar. Solo reconoce la
+     * forma "<título>. <Nombre[ Apellido...]>", que es como el agente nombra a
+     * un profesional; así evita falsos positivos con la prosa normal.
+     *
+     * @return array<int,string>
+     */
+    private function titledProfessionalNames(string $text): array
+    {
+        $titles = '(?:[Dd]ra?|[Ll]ic|[Pp]sic|[Pp]siq|[Dd]r|[Dd][ñn]a|[Dd]o[nñ]a)';
+        preg_match_all(
+            '/\b'.$titles.'\.?\s+((?:[A-ZÁÉÍÓÚÑÜ][\p{L}]+)(?:\s+[A-ZÁÉÍÓÚÑÜ][\p{L}]+)*)/u',
+            $text,
+            $m
+        );
+
+        return collect($m[1] ?? [])
+            ->map(fn (string $t) => $this->normalize($t))
+            ->filter(fn (string $t) => $t !== '')
+            ->unique()
+            ->values()
+            ->all();
     }
 
     private function deterministicReply(string $message): string
