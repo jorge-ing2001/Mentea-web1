@@ -1,4 +1,4 @@
-```php
+
 <?php
 
 namespace App\Providers;
@@ -38,4 +38,3 @@ class AppServiceProvider extends ServiceProvider
         Gate::policy(Professional::class, ProfessionalPolicy::class);
     }
 }
-```
