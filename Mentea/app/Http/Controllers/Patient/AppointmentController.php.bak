@@ -1,0 +1,211 @@
+<?php
+
+namespace App\Http\Controllers\Patient;
+
+use App\Enums\Modality;
+use App\Http\Controllers\Controller;
+use App\Http\Requests\RescheduleAppointmentRequest;
+use App\Http\Requests\StoreAppointmentRequest;
+use App\Models\Appointment;
+use App\Models\Professional;
+use App\Services\AppointmentService;
+use App\Services\AvailabilityService;
+use Illuminate\Http\RedirectResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Validation\Rule;
+use Illuminate\View\View;
+
+class AppointmentController extends Controller
+{
+    public function __construct(
+        private AppointmentService $appointmentService,
+        private AvailabilityService $availabilityService,
+    ) {}
+
+    public function create(Request $request): View
+    {
+        $specialty = $request->query('specialty');
+        $query = Professional::query()->where('is_available', true);
+        if ($specialty) {
+            $query->where('specialty', $specialty);
+        }
+        $professionals = $query->orderBy('name')->get();
+        $specialties = Professional::query()
+            ->where('is_available', true)
+            ->distinct()
+            ->pluck('specialty')
+            ->sort()
+            ->values();
+
+        return view('patient.appointments.create', compact('professionals', 'specialties', 'specialty'));
+    }
+
+    public function schedule(Professional $professional): View
+    {
+        abort_unless($professional->is_available, 404);
+        $availableDates = $this->availabilityService->getAvailableDates($professional, 45);
+
+        return view('patient.appointments.schedule', [
+            'professional' => $professional,
+            'availableDates' => $availableDates,
+            'modalities' => Modality::cases(),
+        ]);
+    }
+
+    public function slots(Professional $professional, Request $request)
+    {
+        $request->validate(['date' => 'required|date']);
+        $date = \Carbon\Carbon::parse($request->date);
+        $slots = $this->availabilityService->getAvailableSlots($professional, $date);
+
+        return response()->json(['slots' => $slots]);
+    }
+
+    public function store(StoreAppointmentRequest $request): RedirectResponse
+    {
+        $professional = Professional::findOrFail($request->professional_id);
+
+        abort_unless($professional->is_available, 422, 'Profesional no disponible.');
+
+        // Idempotencia: mismo token de formulario no procesa dos veces
+        $token = $request->input('booking_token') ?: $request->session()->token();
+        $cacheKey = 'booking:' . Auth::id() . ':' . $token;
+        if (\Illuminate\Support\Facades\Cache::has($cacheKey)) {
+            return redirect()->route('patient.appointments.index')
+                ->with('info', 'Tu cita ya fue registrada. Evita enviar el formulario dos veces.');
+        }
+        \Illuminate\Support\Facades\Cache::put($cacheKey, true, now()->addMinutes(5));
+
+        try {
+        $appointment = $this->appointmentService->book(
+            patient: Auth::user(),
+            professional: $professional,
+            date: $request->date,
+            time: $request->time,
+            modality: Modality::from($request->modality),
+            reason: $request->reason,
+            orderDocument: $request->file('order_document'),
+            authorizationDocument: $request->file('authorization_document'),
+        );
+
+        return redirect()
+            ->route('patient.appointments.show', $appointment)
+            ->with('success', '¡Cita agendada correctamente!');
+        } catch (\Illuminate\Database\QueryException $e) {
+            \Illuminate\Support\Facades\Cache::forget($cacheKey);
+            if (str_contains($e->getMessage(), 'appointments_professional_date_time_unique')) {
+                return back()->withErrors(['time' => 'Ese horario acaba de ser tomado. Elige otro.'])->withInput();
+            }
+            throw $e;
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Cache::forget($cacheKey);
+            throw $e;
+        }
+    }
+
+    public function show(Appointment $appointment): View
+    {
+        $this->authorize('view', $appointment);
+        $appointment->load(['professional', 'survey']);
+
+        return view('patient.appointments.show', compact('appointment'));
+    }
+
+    public function index(): View
+    {
+        $appointments = Auth::user()
+            ->appointmentsAsPatient()
+            ->with('professional')
+            ->orderByDesc('date')
+            ->orderByDesc('time')
+            ->paginate(15);
+
+        return view('patient.appointments.index', compact('appointments'));
+    }
+
+    public function cancel(Request $request, Appointment $appointment): RedirectResponse
+    {
+        $this->authorize('cancel', $appointment);
+        $request->validate(['reason' => 'nullable|string|max:500']);
+        $this->appointmentService->cancelByPatient($appointment, Auth::user(), $request->reason);
+
+        return redirect()
+            ->route('patient.appointments.index')
+            ->with('success', 'Cita cancelada correctamente.');
+    }
+
+    public function edit(Appointment $appointment): View
+    {
+        $this->authorize('reschedule', $appointment);
+        $appointment->load('professional');
+        $availableDates = $this->availabilityService->getAvailableDates($appointment->professional, 45);
+
+        return view('patient.appointments.reschedule', [
+            'appointment' => $appointment,
+            'availableDates' => $availableDates,
+            'modalities' => Modality::cases(),
+        ]);
+    }
+
+    public function update(Request $request, Appointment $appointment): RedirectResponse
+    {
+        $this->authorize('reschedule', $appointment);
+        $request->validate([
+            'date' => ['required', 'date', 'after_or_equal:today'],
+            'time' => ['required', 'date_format:H:i'],
+            'modality' => ['nullable', Rule::enum(Modality::class)],
+        ]);
+        $modality = $request->filled('modality') ? Modality::from($request->modality) : null;
+        $this->appointmentService->reschedule(
+            $appointment,
+            Auth::user(),
+            $request->date,
+            $request->time,
+            $modality,
+        );
+
+        return redirect()
+            ->route('patient.appointments.show', $appointment)
+            ->with('success', 'Cita reprogramada correctamente.');
+    }
+
+    public function confirm(Appointment $appointment): RedirectResponse
+    {
+        $this->authorize('view', $appointment);
+        abort_unless(
+            in_array($appointment->status->value, ['pending', 'confirmed'], true),
+            422,
+            'Esta cita no se puede confirmar.'
+        );
+
+        $appointment->update([
+            'status' => \App\Enums\AppointmentStatus::Confirmed,
+            'patient_confirmed_at' => now(),
+        ]);
+
+        return back()->with('success', 'Cita confirmada. ¡Te esperamos!');
+    }
+
+    public function confirmByToken(string $token): RedirectResponse
+    {
+        $appointment = Appointment::where('confirm_token', $token)->firstOrFail();
+        abort_unless(
+            in_array($appointment->status->value, ['pending', 'confirmed'], true),
+            422
+        );
+
+        $appointment->update([
+            'status' => \App\Enums\AppointmentStatus::Confirmed,
+            'patient_confirmed_at' => now(),
+        ]);
+
+        if (auth()->check()) {
+            return redirect()->route('patient.appointments.show', $appointment)
+                ->with('success', 'Cita confirmada. ¡Te esperamos!');
+        }
+
+        return redirect()->route('login')
+            ->with('status', 'Cita confirmada. Inicia sesión para ver el detalle.');
+    }
+}

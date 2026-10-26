@@ -1,0 +1,13 @@
+{
+  "name": "Mentea",
+  "short_name": "Mentea",
+  "description": "Conecta con tu bienestar mental",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#F8FAFC",
+  "theme_color": "#0F766E",
+  "icons": [
+    { "src": "/favicon/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/favicon/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

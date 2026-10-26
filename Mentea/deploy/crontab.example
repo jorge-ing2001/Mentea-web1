@@ -1,0 +1,3 @@
+# Crontab del usuario del deploy (crontab -e)
+# Scheduler Laravel — cada minuto
+* * * * * cd /var/www/mentea && php artisan schedule:run >> /dev/null 2>&1
