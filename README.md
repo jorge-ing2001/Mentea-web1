@@ -5,6 +5,13 @@ Laravel · Pacientes · Profesionales · Administración
 
 ---
 
+## Despliegue y documentación
+
+- **Despliegue en Render + PostgreSQL:** [docs/DESPLIEGUE_RENDER.md](docs/DESPLIEGUE_RENDER.md) (requisitos, correr en local con SQLite, Blueprint `render.yaml` y lista exacta de variables de entorno).
+- **Activar el agente de IA:** [docs/ACTIVAR_IA.md](docs/ACTIVAR_IA.md).
+
+---
+
 ## Características
 
 - **Pacientes:** registro, agendar cita (especialidad → profesional → fecha/hora), cancelar (≥5 días), lista de espera, encuesta post-cita
