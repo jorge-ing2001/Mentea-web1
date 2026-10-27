@@ -26,5 +26,6 @@
                 Gracias por priorizar tu salud mental.
             </p>
         </div>
+        @include('partials.chat-widget')
     </body>
 </html>

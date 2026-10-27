@@ -32,6 +32,7 @@
                 Conecta con tu bienestar mental · © {{ date('Y') }}
             </footer>
         </div>
+    @include('partials.chat-widget')
     <script>
 (function(){
   var t = document.documentElement.getAttribute('data-theme');

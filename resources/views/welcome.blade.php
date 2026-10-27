@@ -3,6 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>Mentea — Conecta con tu bienestar mental</title>
     @include('partials.brand-head')
     @vite(['resources/css/app.css', 'resources/js/app.js'])
@@ -114,5 +115,6 @@
         <p class="text-mentea-600 text-xs mb-2">Conecta con tu bienestar mental.</p>
         <p class="text-xs text-slate-400">© {{ date('Y') }} Mentea — Plataforma de agendamiento de salud mental</p>
     </footer>
+    @include('partials.chat-widget')
 </body>
 </html>
