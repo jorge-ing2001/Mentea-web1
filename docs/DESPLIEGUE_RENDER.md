@@ -80,16 +80,22 @@ todo automáticamente:
 2. En Render: **New > Blueprint** y conecta el repositorio. Render detecta
    `render.yaml` y crea el servicio web + la base de datos PostgreSQL.
 3. La conexión a la base de datos se cablea sola: el Blueprint expone
-   `DATABASE_URL` (y las partes `DB_HOST`, `DB_PORT`, `DB_DATABASE`,
-   `DB_USERNAME`, `DB_PASSWORD`) desde la base `mentea-db` mediante
-   `fromDatabase`. `config/database.php` lee `DATABASE_URL` de forma nativa para
-   la conexión `pgsql`, así que no hay que rellenar nada a mano.
+   únicamente `DATABASE_URL` desde la base `mentea-db` mediante `fromDatabase`.
+   `config/database.php` lee `DATABASE_URL` de forma nativa para la conexión
+   `pgsql`, así que no hay que rellenar `DB_HOST`/`DB_PORT`/`DB_DATABASE`/
+   `DB_USERNAME`/`DB_PASSWORD` a mano.
 4. `APP_KEY` se genera automáticamente (`generateValue: true`). No la pegues tú.
-5. Define los secretos marcados como `sync: false` en el dashboard de Render:
+5. Define los secretos y valores por operador marcados como `sync: false` en el
+   dashboard de Render:
    - **`OPENROUTER_API_KEY`**: pégala como variable secreta (formato
      `sk-or-v1-...`). Opcional; si no la pones, el chat usa la ruta determinista.
    - **`APP_URL`**: ponla con la URL pública que Render asigna al servicio una
      vez creada (por ejemplo `https://mentea-web.onrender.com`).
+   - **Correo (`MAIL_*`)**: el Blueprint fija `MAIL_MAILER=smtp`,
+     `MAIL_PORT=587`, `MAIL_ENCRYPTION=tls` y `MAIL_FROM_NAME=Mentea` como
+     valores fijos, pero deja `MAIL_HOST`, `MAIL_USERNAME`, `MAIL_PASSWORD` y
+     `MAIL_FROM_ADDRESS` como `sync: false` porque dependen de tu proveedor SMTP
+     y dominio. Rellénalos en el dashboard para habilitar el envío de correo.
 6. Render construye la imagen Docker y lanza el servicio. En el arranque del
    contenedor se ejecutan las migraciones y el cacheo de configuración (ver
    sección **Migraciones y datos**).
@@ -114,24 +120,24 @@ automáticamente desde la base de datos gestionada.
 | `LOG_CHANNEL` | Canal de logs | `stack` | No |
 | `LOG_LEVEL` | Nivel mínimo de log | `error` | No |
 | `DB_CONNECTION` | Driver de base de datos | `pgsql` | No |
-| `DATABASE_URL` | Cadena de conexión completa a PostgreSQL (inyectada por Render desde `mentea-db`). La app la lee de forma nativa | `postgres://usuario:password@host:5432/mentea` | **Sí** |
-| `DB_HOST` | Host de la base (inyectado desde `mentea-db`; alternativa a `DATABASE_URL`) | `dpg-xxxx.oregon-postgres.render.com` | No |
-| `DB_PORT` | Puerto de PostgreSQL | `5432` | No |
-| `DB_DATABASE` | Nombre de la base | `mentea` | No |
-| `DB_USERNAME` | Usuario de la base (inyectado desde `mentea-db`) | `mentea` | No |
-| `DB_PASSWORD` | Contraseña de la base (inyectada desde `mentea-db`) | `(generada por Render)` | **Sí** |
+| `DATABASE_URL` | Cadena de conexión completa a PostgreSQL. El Blueprint la inyecta automáticamente desde `mentea-db` (`fromDatabase`) y la app la lee de forma nativa. Es lo único que necesitas para la base | `postgres://usuario:password@host:5432/mentea` | **Sí** |
+| `DB_HOST` | Host de la base. Opcional: alternativa manual a `DATABASE_URL`. El Blueprint NO lo inyecta | `dpg-xxxx.oregon-postgres.render.com` | No |
+| `DB_PORT` | Puerto de PostgreSQL. Opcional (manual). El Blueprint NO lo inyecta | `5432` | No |
+| `DB_DATABASE` | Nombre de la base. Opcional (manual). El Blueprint NO lo inyecta | `mentea` | No |
+| `DB_USERNAME` | Usuario de la base. Opcional (manual). El Blueprint NO lo inyecta | `mentea` | No |
+| `DB_PASSWORD` | Contraseña de la base. Opcional (manual). El Blueprint NO lo inyecta | `(generada por Render)` | **Sí** |
 | `SESSION_DRIVER` | Almacenamiento de sesiones | `database` | No |
 | `SESSION_SECURE_COOKIE` | Cookies de sesión solo por HTTPS | `true` | No |
 | `CACHE_STORE` | Almacén de caché | `database` | No |
 | `QUEUE_CONNECTION` | Conexión de colas | `database` | No |
-| `MAIL_MAILER` | Transporte de correo | `smtp` | No |
-| `MAIL_HOST` | Servidor SMTP | `smtp.tudominio.com` | No |
-| `MAIL_PORT` | Puerto SMTP | `587` | No |
-| `MAIL_USERNAME` | Usuario SMTP | `apikey` | **Sí** |
-| `MAIL_PASSWORD` | Contraseña SMTP | `(credencial del proveedor)` | **Sí** |
-| `MAIL_ENCRYPTION` | Cifrado SMTP | `tls` | No |
-| `MAIL_FROM_ADDRESS` | Remitente de los correos | `noreply@tudominio.com` | No |
-| `MAIL_FROM_NAME` | Nombre del remitente | `${APP_NAME}` | No |
+| `MAIL_MAILER` | Transporte de correo (fijado por el Blueprint) | `smtp` | No |
+| `MAIL_HOST` | Servidor SMTP. `sync: false`: ponlo en el dashboard | `smtp.tudominio.com` | No |
+| `MAIL_PORT` | Puerto SMTP (fijado por el Blueprint) | `587` | No |
+| `MAIL_USERNAME` | Usuario SMTP. `sync: false`: ponlo en el dashboard | `apikey` | **Sí** |
+| `MAIL_PASSWORD` | Contraseña SMTP. `sync: false`: ponlo en el dashboard | `(credencial del proveedor)` | **Sí** |
+| `MAIL_ENCRYPTION` | Cifrado SMTP (fijado por el Blueprint) | `tls` | No |
+| `MAIL_FROM_ADDRESS` | Remitente de los correos. `sync: false`: ponlo en el dashboard | `noreply@tudominio.com` | No |
+| `MAIL_FROM_NAME` | Nombre del remitente (fijado por el Blueprint) | `Mentea` | No |
 | `MENTEA_FORCE_HTTPS` | Forzar HTTPS en producción | `true` | No |
 | `OPENROUTER_API_KEY` | Clave de OpenRouter para el chat/IA. Nunca en git; pegar en el dashboard | `sk-or-v1-...` | **Sí** |
 | `OPENROUTER_MODEL` | Modelo usado por el agente | `openai/gpt-4o-mini` | No |
@@ -141,9 +147,18 @@ automáticamente desde la base de datos gestionada.
 | `CHAT_CRISIS_LINE` | Línea de crisis que muestra el agente | `106` | No |
 | `CHAT_CRISIS_CLASSIFIER` | Activa el clasificador de crisis | `true` | No |
 
-> **Base de datos:** basta con `DATABASE_URL` (secreto) para conectar PostgreSQL.
-> Las variables `DB_HOST`/`DB_PORT`/`DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD` son
-> una alternativa equivalente; el Blueprint inyecta ambas desde `mentea-db`.
+> **Base de datos:** el Blueprint provisiona PostgreSQL inyectando únicamente
+> `DATABASE_URL` desde `mentea-db`; `config/database.php` la lee de forma nativa
+> para la conexión `pgsql`, así que no necesitas nada más. Las variables
+> `DB_HOST`/`DB_PORT`/`DB_DATABASE`/`DB_USERNAME`/`DB_PASSWORD` quedan como
+> alternativa manual equivalente (por ejemplo si conectas a otra base), pero el
+> Blueprint NO las inyecta.
+>
+> **Correo:** el Blueprint deja fijos `MAIL_MAILER=smtp`, `MAIL_PORT=587`,
+> `MAIL_ENCRYPTION=tls` y `MAIL_FROM_NAME=Mentea`. Debes completar en el
+> dashboard de Render (como `sync: false`) `MAIL_HOST`, `MAIL_USERNAME`,
+> `MAIL_PASSWORD` y `MAIL_FROM_ADDRESS` con los datos de tu proveedor SMTP y tu
+> dominio. Hasta que lo hagas, el envío de correo no estará configurado.
 
 ---
 

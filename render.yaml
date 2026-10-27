@@ -5,8 +5,10 @@
 # PostgreSQL database. The DB connection is wired to the app via DATABASE_URL
 # (which config/database.php honors for the pgsql connection).
 #
-# Secrets (sync: false) must be set in the Render dashboard:
+# Secrets / per-operator values (sync: false) must be set in the Render dashboard:
+#   - APP_URL
 #   - OPENROUTER_API_KEY
+#   - MAIL_HOST, MAIL_USERNAME, MAIL_PASSWORD, MAIL_FROM_ADDRESS
 
 databases:
   - name: mentea-db
@@ -57,37 +59,39 @@ services:
       - key: QUEUE_CONNECTION
         value: database
 
-      # Database (PostgreSQL). DATABASE_URL is read natively by config/database.php.
+      # Database (PostgreSQL). Only DATABASE_URL is wired here; config/database.php
+      # reads it natively for the pgsql connection, so the discrete DB_HOST/
+      # DB_PORT/DB_DATABASE/DB_USERNAME/DB_PASSWORD vars are not needed.
       - key: DB_CONNECTION
         value: pgsql
       - key: DATABASE_URL
         fromDatabase:
           name: mentea-db
           property: connectionString
-      - key: DB_HOST
-        fromDatabase:
-          name: mentea-db
-          property: host
-      - key: DB_PORT
-        fromDatabase:
-          name: mentea-db
-          property: port
-      - key: DB_DATABASE
-        fromDatabase:
-          name: mentea-db
-          property: database
-      - key: DB_USERNAME
-        fromDatabase:
-          name: mentea-db
-          property: user
-      - key: DB_PASSWORD
-        fromDatabase:
-          name: mentea-db
-          property: password
 
       # HTTPS enforcement
       - key: MENTEA_FORCE_HTTPS
         value: "true"
+
+      # Mail (SMTP). MAIL_USERNAME/MAIL_PASSWORD are secrets (sync: false) set in
+      # the dashboard. MAIL_HOST and MAIL_FROM_ADDRESS depend on the operator's
+      # provider/domain, so they are also sync: false. The rest are plain values.
+      - key: MAIL_MAILER
+        value: smtp
+      - key: MAIL_HOST
+        sync: false
+      - key: MAIL_PORT
+        value: "587"
+      - key: MAIL_USERNAME
+        sync: false
+      - key: MAIL_PASSWORD
+        sync: false
+      - key: MAIL_ENCRYPTION
+        value: tls
+      - key: MAIL_FROM_ADDRESS
+        sync: false
+      - key: MAIL_FROM_NAME
+        value: Mentea
 
       # Chat agent / OpenRouter
       - key: OPENROUTER_API_KEY
