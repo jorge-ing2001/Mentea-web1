@@ -1,0 +1,106 @@
+# Render Blueprint for Mentea (Laravel + PostgreSQL)
+# Docs: https://render.com/docs/blueprint-spec
+#
+# This provisions a Docker web service built from ./Dockerfile and a managed
+# PostgreSQL database. The DB connection is wired to the app via DATABASE_URL
+# (which config/database.php honors for the pgsql connection).
+#
+# Secrets (sync: false) must be set in the Render dashboard:
+#   - OPENROUTER_API_KEY
+
+databases:
+  - name: mentea-db
+    databaseName: mentea
+    user: mentea
+    plan: free
+
+services:
+  - type: web
+    name: mentea-web
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /up
+    autoDeploy: true
+    envVars:
+      # Laravel core
+      - key: APP_NAME
+        value: Mentea
+      - key: APP_ENV
+        value: production
+      - key: APP_KEY
+        generateValue: true
+      - key: APP_DEBUG
+        value: "false"
+      - key: APP_LOCALE
+        value: es
+      - key: APP_FALLBACK_LOCALE
+        value: es
+      # IMPORTANT: set APP_URL to the public URL Render assigns this service
+      # (e.g. https://mentea-web.onrender.com) once it is known.
+      - key: APP_URL
+        sync: false
+
+      # Logging
+      - key: LOG_CHANNEL
+        value: stack
+      - key: LOG_LEVEL
+        value: error
+
+      # Drivers (backed by the database)
+      - key: SESSION_DRIVER
+        value: database
+      - key: SESSION_SECURE_COOKIE
+        value: "true"
+      - key: CACHE_STORE
+        value: database
+      - key: QUEUE_CONNECTION
+        value: database
+
+      # Database (PostgreSQL). DATABASE_URL is read natively by config/database.php.
+      - key: DB_CONNECTION
+        value: pgsql
+      - key: DATABASE_URL
+        fromDatabase:
+          name: mentea-db
+          property: connectionString
+      - key: DB_HOST
+        fromDatabase:
+          name: mentea-db
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: mentea-db
+          property: port
+      - key: DB_DATABASE
+        fromDatabase:
+          name: mentea-db
+          property: database
+      - key: DB_USERNAME
+        fromDatabase:
+          name: mentea-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: mentea-db
+          property: password
+
+      # HTTPS enforcement
+      - key: MENTEA_FORCE_HTTPS
+        value: "true"
+
+      # Chat agent / OpenRouter
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: openai/gpt-4o-mini
+      - key: OPENROUTER_BASE_URL
+        value: https://openrouter.ai/api/v1
+      - key: CHAT_HISTORY_WINDOW
+        value: "12"
+      - key: CHAT_HTTP_TIMEOUT
+        value: "20"
+      - key: CHAT_CRISIS_LINE
+        value: "106"
+      - key: CHAT_CRISIS_CLASSIFIER
+        value: "true"
