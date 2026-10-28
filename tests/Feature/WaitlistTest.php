@@ -4,9 +4,11 @@ namespace Tests\Feature;
 
 use App\Enums\Role;
 use App\Enums\WaitlistStatus;
-use App\Models\Professional;
+use App\Jobs\ScanWaitlistSlots;
 use App\Models\User;
 use App\Models\WaitlistEntry;
+use App\Services\AvailabilityService;
+use App\Services\WaitlistService;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Tests\TestCase;
 
@@ -23,8 +25,12 @@ class WaitlistTest extends TestCase
             'consent_informed_at' => now(),
         ]);
         if (method_exists($user, 'assignRole')) {
-            try { $user->assignRole('patient'); } catch (\Throwable) {}
+            try {
+                $user->assignRole('patient');
+            } catch (\Throwable) {
+            }
         }
+
         return $user;
     }
 
@@ -76,7 +82,6 @@ class WaitlistTest extends TestCase
     {
         $this->get(route('patient.waitlist.index'))->assertRedirect(route('login'));
     }
-}
 
     public function test_waitlist_scan_job_runs_without_error(): void
     {
@@ -89,11 +94,12 @@ class WaitlistTest extends TestCase
             'status' => WaitlistStatus::Waiting,
         ]);
 
-        $job = new \App\Jobs\ScanWaitlistSlots(7);
+        $job = new ScanWaitlistSlots(7);
         $job->handle(
-            app(\App\Services\AvailabilityService::class),
-            app(\App\Services\WaitlistService::class)
+            app(AvailabilityService::class),
+            app(WaitlistService::class)
         );
 
         $this->assertTrue(true); // no exception
     }
+}
