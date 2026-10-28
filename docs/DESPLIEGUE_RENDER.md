@@ -85,17 +85,28 @@ todo automáticamente:
    `pgsql`, así que no hay que rellenar `DB_HOST`/`DB_PORT`/`DB_DATABASE`/
    `DB_USERNAME`/`DB_PASSWORD` a mano.
 4. `APP_KEY` se genera automáticamente (`generateValue: true`). No la pegues tú.
-5. Define los secretos y valores por operador marcados como `sync: false` en el
-   dashboard de Render:
-   - **`OPENROUTER_API_KEY`**: pégala como variable secreta (formato
-     `sk-or-v1-...`). Opcional; si no la pones, el chat usa la ruta determinista.
-   - **`APP_URL`**: ponla con la URL pública que Render asigna al servicio una
-     vez creada (por ejemplo `https://mentea-web.onrender.com`).
-   - **Correo (`MAIL_*`)**: el Blueprint fija `MAIL_MAILER=smtp`,
-     `MAIL_PORT=587`, `MAIL_ENCRYPTION=tls` y `MAIL_FROM_NAME=Mentea` como
-     valores fijos, pero deja `MAIL_HOST`, `MAIL_USERNAME`, `MAIL_PASSWORD` y
-     `MAIL_FROM_ADDRESS` como `sync: false` porque dependen de tu proveedor SMTP
-     y dominio. Rellénalos en el dashboard para habilitar el envío de correo.
+5. **El primer deploy NO requiere que rellenes ningún secreto.** `APP_KEY` se
+   genera sola, la base de datos se conecta automáticamente por `DATABASE_URL`,
+   el correo usa el transporte `log` (no envía nada real, pero nada falla por
+   falta de SMTP) y `APP_URL` trae un valor por defecto. El chat funciona en
+   modo determinista sin clave de OpenRouter. Con esto el despliegue arranca tal
+   cual.
+
+   Cuando los tengas, configura estos valores **opcionales** en el dashboard de
+   Render (Environment) y vuelve a desplegar:
+   - **`OPENROUTER_API_KEY`**: variable secreta (formato `sk-or-v1-...`). Activa
+     la redacción con IA y la capa 3 de detección de crisis. Si no la pones, el
+     chat sigue funcionando con las capas deterministas.
+   - **`APP_URL`**: cámbiala a la URL pública real que Render asigna al servicio
+     (por ejemplo `https://mentea-web.onrender.com`) para que los enlaces
+     absolutos y los correos salgan correctos.
+   - **Correo real (`MAIL_*`)**: para enviar correos de verdad (verificación de
+     cuenta, recuperación de contraseña, notificaciones de citas), cambia
+     `MAIL_MAILER` a `smtp` y añade `MAIL_HOST`, `MAIL_PORT=587`,
+     `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_ENCRYPTION=tls` y
+     `MAIL_FROM_ADDRESS`. Con Gmail usa una **Contraseña de aplicación** (no tu
+     contraseña normal; requiere verificación en 2 pasos), o usa un proveedor
+     como Resend/Mailgun.
 6. Render construye la imagen Docker y lanza el servicio. En el arranque del
    contenedor se ejecutan las migraciones y el cacheo de configuración (ver
    sección **Migraciones y datos**).

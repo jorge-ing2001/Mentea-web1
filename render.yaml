@@ -5,10 +5,15 @@
 # PostgreSQL database. The DB connection is wired to the app via DATABASE_URL
 # (which config/database.php honors for the pgsql connection).
 #
-# Secrets / per-operator values (sync: false) must be set in the Render dashboard:
-#   - APP_URL
-#   - OPENROUTER_API_KEY
-#   - MAIL_HOST, MAIL_USERNAME, MAIL_PASSWORD, MAIL_FROM_ADDRESS
+# First deploy needs NO manually-set secrets: APP_KEY is generated, the DB is
+# wired automatically via DATABASE_URL, mail uses the 'log' mailer, and APP_URL
+# has a sensible default. The chat agent runs in deterministic mode with no
+# OpenRouter key.
+#
+# Optional, set later in the Render dashboard when you have them:
+#   - OPENROUTER_API_KEY  -> enables LLM phrasing + layer-3 crisis classifier
+#   - APP_URL             -> set to the real Render URL for correct absolute links
+#   - MAIL_* (+ MAIL_MAILER=smtp) -> enables real outgoing email
 
 databases:
   - name: mentea-db
@@ -38,10 +43,12 @@ services:
         value: es
       - key: APP_FALLBACK_LOCALE
         value: es
-      # IMPORTANT: set APP_URL to the public URL Render assigns this service
-      # (e.g. https://mentea-web.onrender.com) once it is known.
+      # APP_URL: a non-blocking default so the first deploy does not require it.
+      # After Render assigns the public URL (e.g. https://mentea-web.onrender.com)
+      # set it here in the dashboard and redeploy so generated links/emails are
+      # correct. Leaving the default only affects absolute-link generation.
       - key: APP_URL
-        sync: false
+        value: https://mentea-web.onrender.com
 
       # Logging
       - key: LOG_CHANNEL
@@ -73,23 +80,21 @@ services:
       - key: MENTEA_FORCE_HTTPS
         value: "true"
 
-      # Mail (SMTP). MAIL_USERNAME/MAIL_PASSWORD are secrets (sync: false) set in
-      # the dashboard. MAIL_HOST and MAIL_FROM_ADDRESS depend on the operator's
-      # provider/domain, so they are also sync: false. The rest are plain values.
+      # Mail: first deploy uses the 'log' mailer so NO SMTP credentials are
+      # required and nothing can fail for lack of mail config (outgoing mail is
+      # written to the log instead of being sent). This keeps account
+      # verification / password reset / appointment notifications from erroring
+      # while you have no mail provider yet.
+      #
+      # To enable real email later, set MAIL_MAILER=smtp in the Render dashboard
+      # and add these variables (Gmail needs an App Password, not your normal
+      # password; or use a provider like Resend/Mailgun):
+      #   MAIL_HOST, MAIL_PORT=587, MAIL_USERNAME, MAIL_PASSWORD,
+      #   MAIL_ENCRYPTION=tls, MAIL_FROM_ADDRESS, MAIL_FROM_NAME
       - key: MAIL_MAILER
-        value: smtp
-      - key: MAIL_HOST
-        sync: false
-      - key: MAIL_PORT
-        value: "587"
-      - key: MAIL_USERNAME
-        sync: false
-      - key: MAIL_PASSWORD
-        sync: false
-      - key: MAIL_ENCRYPTION
-        value: tls
+        value: log
       - key: MAIL_FROM_ADDRESS
-        sync: false
+        value: no-reply@mentea.local
       - key: MAIL_FROM_NAME
         value: Mentea
 
