@@ -84,13 +84,19 @@ todo automáticamente:
    `config/database.php` lee `DATABASE_URL` de forma nativa para la conexión
    `pgsql`, así que no hay que rellenar `DB_HOST`/`DB_PORT`/`DB_DATABASE`/
    `DB_USERNAME`/`DB_PASSWORD` a mano.
-4. `APP_KEY` se genera automáticamente (`generateValue: true`). No la pegues tú.
-5. **El primer deploy NO requiere que rellenes ningún secreto.** `APP_KEY` se
-   genera sola, la base de datos se conecta automáticamente por `DATABASE_URL`,
-   el correo usa el transporte `log` (no envía nada real, pero nada falla por
-   falta de SMTP) y `APP_URL` trae un valor por defecto. El chat funciona en
-   modo determinista sin clave de OpenRouter. Con esto el despliegue arranca tal
-   cual.
+4. **`APP_KEY` (obligatoria, formato especial):** Laravel exige una clave con el
+   formato `base64:` + 32 bytes codificados (lo que imprime
+   `php artisan key:generate --show`). El `generateValue` de Render NO sirve
+   aquí: genera una cadena aleatoria sin el prefijo `base64:` ni la longitud
+   correcta, y la app lanza `RuntimeException: Unsupported cipher or incorrect
+   key length`. Por eso `APP_KEY` está como `sync: false`: genera una en tu
+   máquina con `php artisan key:generate --show` y pega el valor completo
+   (incluido `base64:`) en el dashboard de Render.
+5. **Aparte de `APP_KEY`, el primer deploy NO requiere más secretos.** La base de
+   datos se conecta automáticamente por `DATABASE_URL`, el correo usa el
+   transporte `log` (no envía nada real, pero nada falla por falta de SMTP) y
+   `APP_URL` trae un valor por defecto. El chat funciona en modo determinista sin
+   clave de OpenRouter.
 
    Cuando los tengas, configura estos valores **opcionales** en el dashboard de
    Render (Environment) y vuelve a desplegar:
@@ -123,7 +129,7 @@ automáticamente desde la base de datos gestionada.
 |----------|-----------|-----------------|-----------|
 | `APP_NAME` | Nombre de la aplicación | `Mentea` | No |
 | `APP_ENV` | Entorno de ejecución | `production` | No |
-| `APP_KEY` | Clave de cifrado de Laravel. En Render se genera sola (`generateValue: true`). En local: `php artisan key:generate --show` y pegar | `base64:...` | **Sí** |
+| `APP_KEY` | Clave de cifrado de Laravel. `sync: false`: genérala con `php artisan key:generate --show` y pega el valor completo (debe empezar por `base64:`). NO uses el generateValue de Render: produce un formato inválido | `base64:...` | **Sí** |
 | `APP_DEBUG` | Modo depuración (debe ir en false en producción) | `false` | No |
 | `APP_URL` | URL pública del servicio en Render | `https://mentea-web.onrender.com` | No |
 | `APP_LOCALE` | Idioma por defecto | `es` | No |
